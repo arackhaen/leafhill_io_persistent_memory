@@ -197,6 +197,14 @@ fn handle_tools_list(id: &Value) -> Value {
                             "project": {
                                 "type": "string",
                                 "description": "Optional project/repo context"
+                            },
+                            "entry_type": {
+                                "type": "string",
+                                "description": "Entry type: 'summary', 'raw_user', or 'raw_assistant'. Default: 'summary' when called by Claude."
+                            },
+                            "raw_id": {
+                                "type": "integer",
+                                "description": "Optional ID of the raw conversation entry this summary relates to."
                             }
                         },
                         "required": ["session_id", "role", "content"]
@@ -216,12 +224,34 @@ fn handle_tools_list(id: &Value) -> Value {
                                 "type": "string",
                                 "description": "Optional session ID filter"
                             },
+                            "entry_type": {
+                                "type": "string",
+                                "description": "Filter by entry type: 'summary', 'raw_user', 'raw_assistant'. Omit to search all."
+                            },
                             "limit": {
                                 "type": "integer",
                                 "description": "Max results (default 20)"
                             }
                         },
                         "required": ["query"]
+                    }
+                },
+                {
+                    "name": "get_conversation_context",
+                    "description": "Get all conversation summaries for a session in chronological order. Use this to load prior session context.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "session_id": {
+                                "type": "string",
+                                "description": "Session ID to retrieve context for"
+                            },
+                            "limit": {
+                                "type": "integer",
+                                "description": "Max results (default 50)"
+                            }
+                        },
+                        "required": ["session_id"]
                     }
                 }
             ]
@@ -240,6 +270,7 @@ fn handle_tools_call(id: &Value, params: &Value, db: &Database) -> Value {
         "delete_memory" => tool_delete_memory(&args, db),
         "log_conversation" => tool_log_conversation(&args, db),
         "search_conversations" => tool_search_conversations(&args, db),
+        "get_conversation_context" => tool_get_conversation_context(&args, db),
         _ => Err(format!("Unknown tool: {}", tool_name)),
     };
 
@@ -337,8 +368,10 @@ fn tool_log_conversation(args: &Value, db: &Database) -> Result<String, String> 
     let content = args.get("content").and_then(|v| v.as_str())
         .ok_or("missing 'content'")?;
     let project = args.get("project").and_then(|v| v.as_str());
+    let entry_type = args.get("entry_type").and_then(|v| v.as_str());
+    let raw_id = args.get("raw_id").and_then(|v| v.as_i64());
 
-    let entry = db.log_conversation(session_id, role, content, project)
+    let entry = db.log_conversation(session_id, role, content, project, entry_type, raw_id)
         .map_err(|e| format!("Log error: {}", e))?;
 
     Ok(serde_json::to_string_pretty(&entry).unwrap_or_default())
@@ -348,15 +381,33 @@ fn tool_search_conversations(args: &Value, db: &Database) -> Result<String, Stri
     let query = args.get("query").and_then(|v| v.as_str())
         .ok_or("missing 'query'")?;
     let session_id = args.get("session_id").and_then(|v| v.as_str());
+    let entry_type = args.get("entry_type").and_then(|v| v.as_str());
     let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(20) as usize;
 
-    let entries = db.search_conversations(query, session_id, limit)
+    let entries = db.search_conversations(query, session_id, entry_type, limit)
         .map_err(|e| format!("Search error: {}", e))?;
 
     if entries.is_empty() {
         Ok("No conversations found matching the query.".to_string())
     } else {
         Ok(format!("Found {} conversation entries:\n{}",
+            entries.len(),
+            serde_json::to_string_pretty(&entries).unwrap_or_default()))
+    }
+}
+
+fn tool_get_conversation_context(args: &Value, db: &Database) -> Result<String, String> {
+    let session_id = args.get("session_id").and_then(|v| v.as_str())
+        .ok_or("missing 'session_id'")?;
+    let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(50) as usize;
+
+    let entries = db.get_conversation_context(session_id, limit)
+        .map_err(|e| format!("Context error: {}", e))?;
+
+    if entries.is_empty() {
+        Ok("No conversation context found for this session.".to_string())
+    } else {
+        Ok(format!("Session context ({} summaries):\n{}",
             entries.len(),
             serde_json::to_string_pretty(&entries).unwrap_or_default()))
     }
