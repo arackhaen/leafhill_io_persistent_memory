@@ -1,0 +1,19 @@
+[package]
+name = "leafhill-persistent-memory"
+version = "1.0.0"
+edition = "2021"
+
+[[bin]]
+name = "leafhill-persistent-memory"
+path = "src/main.rs"
+
+[dependencies]
+rusqlite = { version = "0.31", features = ["bundled"] }
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+opt-level = "z"
+lto = true
+strip = true
