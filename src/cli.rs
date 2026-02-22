@@ -260,6 +260,10 @@ pub fn run_cli(command: Commands, db_path: &PathBuf) {
                 }
             }
             LogCommands::Prune { older_than, entry_type } => {
+                if older_than <= 0 {
+                    eprintln!("--older-than must be a positive number of days");
+                    std::process::exit(1);
+                }
                 match db.prune_conversations(older_than, entry_type.as_deref()) {
                     Ok(count) => println!("Pruned {} entries", count),
                     Err(e) => {

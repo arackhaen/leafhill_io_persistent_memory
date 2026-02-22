@@ -1,22 +1,20 @@
 use serde_json::Value;
 use std::io::{self, Read};
 use std::path::PathBuf;
-use chrono::Local;
 
 use crate::db::Database;
 
-/// Derive a formatted session_id from hook JSON fields.
-/// Format: {session_id}-{YYYY-MM-DD-HHMMSS}-{project_name}
-fn derive_session_id(session_id: &str, cwd: &str) -> String {
-    let project = cwd.rsplit('/').next().unwrap_or("unknown0");
-    let project = if project.is_empty() { "unknown0" } else { project };
-    let timestamp = Local::now().format("%Y-%m-%d-%H%M%S");
-    format!("{}-{}-{}", session_id, timestamp, project)
+/// Extract project name from cwd path.
+fn project_from_cwd(cwd: &str) -> &str {
+    let p = cwd.rsplit('/').next().unwrap_or("unknown0");
+    if p.is_empty() { "unknown0" } else { p }
 }
 
-fn derive_project(cwd: &str) -> String {
-    let project = cwd.rsplit('/').next().unwrap_or("unknown0");
-    if project.is_empty() { "unknown0".to_string() } else { project.to_string() }
+/// Derive a formatted session_id from hook JSON fields.
+/// Format: {session_id}-{project_name}
+/// No timestamp — hooks are independent processes and timestamps would differ.
+fn derive_session_id(session_id: &str, cwd: &str) -> String {
+    format!("{}-{}", session_id, project_from_cwd(cwd))
 }
 
 pub fn handle_hook(db_path: &PathBuf) {
@@ -47,7 +45,7 @@ pub fn handle_hook(db_path: &PathBuf) {
     match event {
         "SessionStart" => {
             let formatted_sid = derive_session_id(session_id, cwd);
-            let project = derive_project(cwd);
+            let project = project_from_cwd(cwd);
             let output = serde_json::json!({
                 "additionalContext": format!(
                     "[leafhill-memory] session_id={} project={}. \
@@ -61,19 +59,21 @@ pub fn handle_hook(db_path: &PathBuf) {
         }
         "UserPromptSubmit" => {
             let prompt = hook.get("prompt")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
+                .map(|v| v.as_str().unwrap_or(&v.to_string()).to_string())
+                .unwrap_or_default();
             if prompt.is_empty() { return; }
             let formatted_sid = derive_session_id(session_id, cwd);
-            let project = derive_project(cwd);
+            let project = project_from_cwd(cwd);
             let db = match Database::open(db_path) {
                 Ok(db) => db,
                 Err(e) => { eprintln!("leafhill-hook: db error: {}", e); return; }
             };
-            let _ = db.log_conversation(
-                &formatted_sid, "user", prompt,
-                Some(&project), Some("raw_user"), None,
-            );
+            if let Err(e) = db.log_conversation(
+                &formatted_sid, "user", &prompt,
+                Some(project), Some("raw_user"), None,
+            ) {
+                eprintln!("leafhill-hook: failed to log UserPromptSubmit: {}", e);
+            }
         }
         "Stop" => {
             let stop_active = hook.get("stop_hook_active")
@@ -81,19 +81,21 @@ pub fn handle_hook(db_path: &PathBuf) {
                 .unwrap_or(false);
             if stop_active { return; }
             let message = hook.get("last_assistant_message")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
+                .map(|v| v.as_str().unwrap_or(&v.to_string()).to_string())
+                .unwrap_or_default();
             if message.is_empty() { return; }
             let formatted_sid = derive_session_id(session_id, cwd);
-            let project = derive_project(cwd);
+            let project = project_from_cwd(cwd);
             let db = match Database::open(db_path) {
                 Ok(db) => db,
                 Err(e) => { eprintln!("leafhill-hook: db error: {}", e); return; }
             };
-            let _ = db.log_conversation(
-                &formatted_sid, "assistant", message,
-                Some(&project), Some("raw_assistant"), None,
-            );
+            if let Err(e) = db.log_conversation(
+                &formatted_sid, "assistant", &message,
+                Some(project), Some("raw_assistant"), None,
+            ) {
+                eprintln!("leafhill-hook: failed to log Stop: {}", e);
+            }
         }
         _ => {
             eprintln!("leafhill-hook: ignoring event: {}", event);
