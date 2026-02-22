@@ -59,6 +59,9 @@ pub enum Commands {
         key: String,
     },
 
+    /// Handle Claude Code hook events (reads JSON from stdin)
+    HookHandler,
+
     /// Conversation log operations
     Log {
         #[command(subcommand)]
@@ -75,6 +78,9 @@ pub enum LogCommands {
         /// Filter by session ID
         #[arg(long, short)]
         session: Option<String>,
+        /// Filter by entry type (raw_user, raw_assistant, summary)
+        #[arg(long, name = "type")]
+        entry_type: Option<String>,
         /// Max results
         #[arg(long, short, default_value = "20")]
         limit: usize,
@@ -85,9 +91,31 @@ pub enum LogCommands {
         /// Filter by session ID
         #[arg(long, short)]
         session: Option<String>,
+        /// Filter by entry type (raw_user, raw_assistant, summary)
+        #[arg(long, name = "type")]
+        entry_type: Option<String>,
         /// Max results
         #[arg(long, short, default_value = "20")]
         limit: usize,
+    },
+
+    /// Get all summaries for a session
+    Context {
+        /// Session ID
+        session_id: String,
+        /// Max results
+        #[arg(long, short, default_value = "50")]
+        limit: usize,
+    },
+
+    /// Prune old conversation entries
+    Prune {
+        /// Delete entries older than N days
+        #[arg(long)]
+        older_than: i64,
+        /// Only prune entries of this type
+        #[arg(long, name = "type")]
+        entry_type: Option<String>,
     },
 }
 
@@ -102,6 +130,7 @@ pub fn run_cli(command: Commands, db_path: &PathBuf) {
 
     match command {
         Commands::Serve => unreachable!("serve handled in main"),
+        Commands::HookHandler => unreachable!("hook-handler handled in main"),
 
         Commands::Store { category, key, value, tags } => {
             let tag_vec: Option<Vec<String>> = tags.map(|t| {
@@ -176,8 +205,8 @@ pub fn run_cli(command: Commands, db_path: &PathBuf) {
         }
 
         Commands::Log { command: log_cmd } => match log_cmd {
-            LogCommands::Search { query, session, limit } => {
-                match db.search_conversations(&query, session.as_deref(), limit) {
+            LogCommands::Search { query, session, entry_type, limit } => {
+                match db.search_conversations(&query, session.as_deref(), entry_type.as_deref(), limit) {
                     Ok(entries) => {
                         if entries.is_empty() {
                             println!("No conversations found.");
@@ -194,8 +223,8 @@ pub fn run_cli(command: Commands, db_path: &PathBuf) {
                     }
                 }
             }
-            LogCommands::List { session, limit } => {
-                match db.list_conversations(session.as_deref(), limit) {
+            LogCommands::List { session, entry_type, limit } => {
+                match db.list_conversations(session.as_deref(), entry_type.as_deref(), limit) {
                     Ok(entries) => {
                         if entries.is_empty() {
                             println!("No conversations found.");
@@ -208,6 +237,33 @@ pub fn run_cli(command: Commands, db_path: &PathBuf) {
                     }
                     Err(e) => {
                         eprintln!("List failed: {}", e);
+                        std::process::exit(1);
+                    }
+                }
+            }
+            LogCommands::Context { session_id, limit } => {
+                match db.get_conversation_context(&session_id, limit) {
+                    Ok(entries) => {
+                        if entries.is_empty() {
+                            println!("No summaries found for session.");
+                        } else {
+                            for entry in &entries {
+                                print_conversation(entry);
+                            }
+                            println!("\n({} summaries)", entries.len());
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("Context failed: {}", e);
+                        std::process::exit(1);
+                    }
+                }
+            }
+            LogCommands::Prune { older_than, entry_type } => {
+                match db.prune_conversations(older_than, entry_type.as_deref()) {
+                    Ok(count) => println!("Pruned {} entries", count),
+                    Err(e) => {
+                        eprintln!("Prune failed: {}", e);
                         std::process::exit(1);
                     }
                 }
@@ -228,7 +284,8 @@ fn print_memory(mem: &crate::db::Memory) {
 
 fn print_conversation(entry: &crate::db::ConversationEntry) {
     println!("---");
-    println!("[{}] {} (session: {})", entry.created_at, entry.role, entry.session_id);
+    let etype = entry.entry_type.as_deref().unwrap_or("unknown");
+    println!("[{}] {} [{}] (session: {})", entry.created_at, entry.role, etype, entry.session_id);
     if let Some(project) = &entry.project {
         println!("  Project: {}", project);
     }

@@ -1,5 +1,6 @@
 mod cli;
 mod db;
+mod hook;
 mod mcp;
 
 use clap::Parser;
@@ -22,6 +23,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     match cli.command {
         Commands::Serve => {
             mcp::serve(&db_path)?;
+            Ok(())
+        }
+        Commands::HookHandler => {
+            hook::handle_hook(&db_path);
             Ok(())
         }
         other => {
