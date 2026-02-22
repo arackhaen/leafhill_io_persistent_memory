@@ -20,6 +20,8 @@ pub struct ConversationEntry {
     pub role: String,
     pub content: String,
     pub project: Option<String>,
+    pub entry_type: Option<String>,
+    pub raw_id: Option<i64>,
     pub created_at: String,
 }
 
@@ -98,6 +100,8 @@ impl Database {
             END;
             "
         )?;
+        self.conn.execute("ALTER TABLE conversations ADD COLUMN entry_type TEXT", []).ok();
+        self.conn.execute("ALTER TABLE conversations ADD COLUMN raw_id INTEGER", []).ok();
         Ok(())
     }
 
@@ -212,59 +216,60 @@ impl Database {
         role: &str,
         content: &str,
         project: Option<&str>,
+        entry_type: Option<&str>,
+        raw_id: Option<i64>,
     ) -> rusqlite::Result<ConversationEntry> {
         self.conn.execute(
-            "INSERT INTO conversations (session_id, role, content, project)
-             VALUES (?1, ?2, ?3, ?4)",
-            params![session_id, role, content, project],
+            "INSERT INTO conversations (session_id, role, content, project, entry_type, raw_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![session_id, role, content, project, entry_type, raw_id],
         )?;
 
         let id = self.conn.last_insert_rowid();
         let mut stmt = self.conn.prepare(
-            "SELECT id, session_id, role, content, project, created_at
+            "SELECT id, session_id, role, content, project, entry_type, raw_id, created_at
              FROM conversations WHERE id = ?1"
         )?;
 
-        stmt.query_row(params![id], |row| {
-            Ok(ConversationEntry {
-                id: row.get(0)?,
-                session_id: row.get(1)?,
-                role: row.get(2)?,
-                content: row.get(3)?,
-                project: row.get(4)?,
-                created_at: row.get(5)?,
-            })
-        })
+        stmt.query_row(params![id], Self::row_to_conversation)
     }
 
     pub fn search_conversations(
         &self,
         query: &str,
         session_id: Option<&str>,
+        entry_type: Option<&str>,
         limit: usize,
     ) -> rusqlite::Result<Vec<ConversationEntry>> {
-        let sql = if session_id.is_some() {
-            "SELECT c.id, c.session_id, c.role, c.content, c.project, c.created_at
+        let mut sql = String::from(
+            "SELECT c.id, c.session_id, c.role, c.content, c.project, c.entry_type, c.raw_id, c.created_at
              FROM conversations_fts f
              JOIN conversations c ON c.id = f.rowid
-             WHERE conversations_fts MATCH ?1 AND c.session_id = ?2
-             ORDER BY rank
-             LIMIT ?3"
-        } else {
-            "SELECT c.id, c.session_id, c.role, c.content, c.project, c.created_at
-             FROM conversations_fts f
-             JOIN conversations c ON c.id = f.rowid
-             WHERE conversations_fts MATCH ?1
-             ORDER BY rank
-             LIMIT ?3"
-        };
+             WHERE conversations_fts MATCH ?1"
+        );
+        let mut p: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(query.to_string())];
+        let mut idx = 2;
 
-        let mut stmt = self.conn.prepare(sql)?;
-        let rows = if let Some(sid) = session_id {
-            stmt.query_map(params![query, sid, limit as i64], Self::row_to_conversation)?
-        } else {
-            stmt.query_map(params![query, "", limit as i64], Self::row_to_conversation)?
-        };
+        if let Some(sid) = session_id {
+            sql.push_str(&format!(" AND c.session_id = ?{}", idx));
+            p.push(Box::new(sid.to_string()));
+            idx += 1;
+        }
+
+        if let Some(et) = entry_type {
+            sql.push_str(&format!(" AND c.entry_type = ?{}", idx));
+            p.push(Box::new(et.to_string()));
+            idx += 1;
+        }
+
+        sql.push_str(&format!(" ORDER BY rank LIMIT ?{}", idx));
+        p.push(Box::new(limit as i64));
+
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(
+            rusqlite::params_from_iter(p.iter()),
+            Self::row_to_conversation,
+        )?;
 
         rows.collect()
     }
@@ -272,24 +277,38 @@ impl Database {
     pub fn list_conversations(
         &self,
         session_id: Option<&str>,
+        entry_type: Option<&str>,
         limit: usize,
     ) -> rusqlite::Result<Vec<ConversationEntry>> {
-        let (sql, p): (&str, Vec<Box<dyn rusqlite::types::ToSql>>) = if let Some(sid) = session_id {
-            (
-                "SELECT id, session_id, role, content, project, created_at
-                 FROM conversations WHERE session_id = ?1
-                 ORDER BY created_at DESC LIMIT ?2",
-                vec![Box::new(sid.to_string()), Box::new(limit as i64)],
-            )
-        } else {
-            (
-                "SELECT id, session_id, role, content, project, created_at
-                 FROM conversations ORDER BY created_at DESC LIMIT ?1",
-                vec![Box::new(limit as i64)],
-            )
-        };
+        let mut sql = String::from(
+            "SELECT id, session_id, role, content, project, entry_type, raw_id, created_at
+             FROM conversations"
+        );
+        let mut p: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+        let mut idx = 1;
+        let mut has_where = false;
 
-        let mut stmt = self.conn.prepare(sql)?;
+        if let Some(sid) = session_id {
+            sql.push_str(&format!(" WHERE session_id = ?{}", idx));
+            p.push(Box::new(sid.to_string()));
+            idx += 1;
+            has_where = true;
+        }
+
+        if let Some(et) = entry_type {
+            if has_where {
+                sql.push_str(&format!(" AND entry_type = ?{}", idx));
+            } else {
+                sql.push_str(&format!(" WHERE entry_type = ?{}", idx));
+            }
+            p.push(Box::new(et.to_string()));
+            idx += 1;
+        }
+
+        sql.push_str(&format!(" ORDER BY created_at DESC LIMIT ?{}", idx));
+        p.push(Box::new(limit as i64));
+
+        let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map(
             rusqlite::params_from_iter(p.iter()),
             Self::row_to_conversation,
@@ -317,7 +336,43 @@ impl Database {
             role: row.get(2)?,
             content: row.get(3)?,
             project: row.get(4)?,
-            created_at: row.get(5)?,
+            entry_type: row.get(5)?,
+            raw_id: row.get(6)?,
+            created_at: row.get(7)?,
         })
+    }
+
+    pub fn get_conversation_context(
+        &self,
+        session_id: &str,
+        limit: usize,
+    ) -> rusqlite::Result<Vec<ConversationEntry>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, session_id, role, content, project, entry_type, raw_id, created_at
+             FROM conversations
+             WHERE session_id = ?1 AND entry_type = 'summary'
+             ORDER BY created_at ASC
+             LIMIT ?2"
+        )?;
+        let rows = stmt.query_map(params![session_id, limit as i64], Self::row_to_conversation)?;
+        rows.collect()
+    }
+
+    pub fn prune_conversations(
+        &self,
+        older_than_days: i64,
+        entry_type: Option<&str>,
+    ) -> rusqlite::Result<usize> {
+        if let Some(et) = entry_type {
+            self.conn.execute(
+                "DELETE FROM conversations WHERE created_at < datetime('now', ?1) AND entry_type = ?2",
+                params![format!("-{} days", older_than_days), et],
+            )
+        } else {
+            self.conn.execute(
+                "DELETE FROM conversations WHERE created_at < datetime('now', ?1)",
+                params![format!("-{} days", older_than_days)],
+            )
+        }
     }
 }
