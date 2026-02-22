@@ -93,7 +93,7 @@ Registered as user-scope MCP server in `~/.claude.json`:
 
 ## Source Location
 
-`~/.local/share/claude-memory/` (Cargo project)
+`/production/programming_challenger/claude_generic/` (Cargo project, GitHub: https://github.com/arackhaen/leafhill_io_persistent_memory)
 
 ## Decision Log
 
