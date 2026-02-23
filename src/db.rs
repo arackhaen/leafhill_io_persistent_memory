@@ -25,6 +25,36 @@ pub struct ConversationEntry {
     pub created_at: String,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct Task {
+    pub id: i64,
+    pub project: String,
+    pub subject: String,
+    pub description: Option<String>,
+    pub status: String,
+    pub priority: Option<String>,
+    pub task_type: Option<String>,
+    pub parent_id: Option<i64>,
+    pub due_date: Option<String>,
+    pub created_by: Option<String>,
+    pub assignee: Option<String>,
+    pub owner: Option<String>,
+    pub session_id: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct Link {
+    pub id: i64,
+    pub source_type: String,
+    pub source_id: i64,
+    pub target_type: String,
+    pub target_id: i64,
+    pub relation: Option<String>,
+    pub created_at: String,
+}
+
 pub struct Database {
     conn: Connection,
 }
@@ -97,6 +127,62 @@ impl Database {
             CREATE TRIGGER IF NOT EXISTS conversations_ad AFTER DELETE ON conversations BEGIN
                 INSERT INTO conversations_fts(conversations_fts, rowid, content)
                 VALUES ('delete', old.id, old.content);
+            END;
+
+            CREATE TABLE IF NOT EXISTS tasks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                project TEXT NOT NULL,
+                subject TEXT NOT NULL,
+                description TEXT,
+                status TEXT NOT NULL DEFAULT 'pending',
+                priority TEXT DEFAULT 'medium',
+                task_type TEXT DEFAULT 'claude',
+                parent_id INTEGER REFERENCES tasks(id),
+                due_date TEXT,
+                created_by TEXT,
+                assignee TEXT,
+                owner TEXT,
+                session_id TEXT,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+
+            CREATE TABLE IF NOT EXISTS task_deps (
+                blocker_id INTEGER NOT NULL REFERENCES tasks(id),
+                blocked_id INTEGER NOT NULL REFERENCES tasks(id),
+                PRIMARY KEY (blocker_id, blocked_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS links (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                source_type TEXT NOT NULL,
+                source_id INTEGER NOT NULL,
+                target_type TEXT NOT NULL,
+                target_id INTEGER NOT NULL,
+                relation TEXT,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                UNIQUE(source_type, source_id, target_type, target_id)
+            );
+
+            CREATE VIRTUAL TABLE IF NOT EXISTS tasks_fts USING fts5(
+                subject, description, content=tasks, content_rowid=id
+            );
+
+            CREATE TRIGGER IF NOT EXISTS tasks_ai AFTER INSERT ON tasks BEGIN
+                INSERT INTO tasks_fts(rowid, subject, description)
+                VALUES (new.id, new.subject, new.description);
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS tasks_ad AFTER DELETE ON tasks BEGIN
+                INSERT INTO tasks_fts(tasks_fts, rowid, subject, description)
+                VALUES ('delete', old.id, old.subject, old.description);
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS tasks_au AFTER UPDATE ON tasks BEGIN
+                INSERT INTO tasks_fts(tasks_fts, rowid, subject, description)
+                VALUES ('delete', old.id, old.subject, old.description);
+                INSERT INTO tasks_fts(rowid, subject, description)
+                VALUES (new.id, new.subject, new.description);
             END;
             "
         )?;
@@ -339,6 +425,38 @@ impl Database {
             entry_type: row.get(5)?,
             raw_id: row.get(6)?,
             created_at: row.get(7)?,
+        })
+    }
+
+    fn row_to_task(row: &rusqlite::Row) -> rusqlite::Result<Task> {
+        Ok(Task {
+            id: row.get(0)?,
+            project: row.get(1)?,
+            subject: row.get(2)?,
+            description: row.get(3)?,
+            status: row.get(4)?,
+            priority: row.get(5)?,
+            task_type: row.get(6)?,
+            parent_id: row.get(7)?,
+            due_date: row.get(8)?,
+            created_by: row.get(9)?,
+            assignee: row.get(10)?,
+            owner: row.get(11)?,
+            session_id: row.get(12)?,
+            created_at: row.get(13)?,
+            updated_at: row.get(14)?,
+        })
+    }
+
+    fn row_to_link(row: &rusqlite::Row) -> rusqlite::Result<Link> {
+        Ok(Link {
+            id: row.get(0)?,
+            source_type: row.get(1)?,
+            source_id: row.get(2)?,
+            target_type: row.get(3)?,
+            target_id: row.get(4)?,
+            relation: row.get(5)?,
+            created_at: row.get(6)?,
         })
     }
 
