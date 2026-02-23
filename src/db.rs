@@ -493,4 +493,163 @@ impl Database {
             )
         }
     }
+
+    // ── Task CRUD ──────────────────────────────────────────────────────
+
+    pub fn create_task(
+        &self,
+        project: &str,
+        subject: &str,
+        description: Option<&str>,
+        priority: Option<&str>,
+        task_type: Option<&str>,
+        parent_id: Option<i64>,
+        due_date: Option<&str>,
+        created_by: Option<&str>,
+        assignee: Option<&str>,
+        owner: Option<&str>,
+        session_id: Option<&str>,
+    ) -> rusqlite::Result<Task> {
+        self.conn.execute(
+            "INSERT INTO tasks (project, subject, description, priority, task_type, parent_id, due_date, created_by, assignee, owner, session_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            params![project, subject, description, priority, task_type, parent_id, due_date, created_by, assignee, owner, session_id],
+        )?;
+        let id = self.conn.last_insert_rowid();
+        self.get_task(id)
+    }
+
+    pub fn get_task(&self, id: i64) -> rusqlite::Result<Task> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, project, subject, description, status, priority, task_type, parent_id, due_date, created_by, assignee, owner, session_id, created_at, updated_at
+             FROM tasks WHERE id = ?1"
+        )?;
+        stmt.query_row(params![id], Self::row_to_task)
+    }
+
+    pub fn update_task(
+        &self,
+        id: i64,
+        updates: &serde_json::Value,
+    ) -> rusqlite::Result<Task> {
+        let allowed = ["subject", "description", "status", "priority", "task_type",
+                       "assignee", "owner", "due_date", "session_id"];
+        let mut sets = Vec::new();
+        let mut p: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+        let mut idx = 1;
+
+        for field in &allowed {
+            if let Some(val) = updates.get(field) {
+                if val.is_null() {
+                    sets.push(format!("{} = NULL", field));
+                } else if let Some(s) = val.as_str() {
+                    sets.push(format!("{} = ?{}", field, idx));
+                    p.push(Box::new(s.to_string()));
+                    idx += 1;
+                }
+            }
+        }
+
+        if sets.is_empty() {
+            return self.get_task(id);
+        }
+
+        sets.push("updated_at = datetime('now')".to_string());
+        let sql = format!("UPDATE tasks SET {} WHERE id = ?{}", sets.join(", "), idx);
+        p.push(Box::new(id));
+
+        self.conn.execute(&sql, rusqlite::params_from_iter(p.iter()))?;
+        self.get_task(id)
+    }
+
+    pub fn list_tasks(
+        &self,
+        project: Option<&str>,
+        status: Option<&str>,
+        assignee: Option<&str>,
+        task_type: Option<&str>,
+        priority: Option<&str>,
+        limit: usize,
+    ) -> rusqlite::Result<Vec<Task>> {
+        let mut sql = String::from(
+            "SELECT id, project, subject, description, status, priority, task_type, parent_id, due_date, created_by, assignee, owner, session_id, created_at, updated_at
+             FROM tasks"
+        );
+        let mut p: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+        let mut idx = 1;
+        let mut has_where = false;
+
+        let filters: Vec<(&str, Option<&str>)> = vec![
+            ("project", project),
+            ("status", status),
+            ("assignee", assignee),
+            ("task_type", task_type),
+            ("priority", priority),
+        ];
+
+        for (col, val) in &filters {
+            if let Some(v) = val {
+                if has_where {
+                    sql.push_str(&format!(" AND {} = ?{}", col, idx));
+                } else {
+                    sql.push_str(&format!(" WHERE {} = ?{}", col, idx));
+                    has_where = true;
+                }
+                p.push(Box::new(v.to_string()));
+                idx += 1;
+            }
+        }
+
+        // Exclude soft-deleted unless explicitly filtering for deleted
+        if status.is_none() {
+            if has_where {
+                sql.push_str(" AND status != 'deleted'");
+            } else {
+                sql.push_str(" WHERE status != 'deleted'");
+            }
+        }
+
+        sql.push_str(&format!(" ORDER BY updated_at DESC LIMIT ?{}", idx));
+        p.push(Box::new(limit as i64));
+
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(p.iter()), Self::row_to_task)?;
+        rows.collect()
+    }
+
+    pub fn search_tasks(
+        &self,
+        query: &str,
+        project: Option<&str>,
+        status: Option<&str>,
+        limit: usize,
+    ) -> rusqlite::Result<Vec<Task>> {
+        let mut sql = String::from(
+            "SELECT t.id, t.project, t.subject, t.description, t.status, t.priority, t.task_type, t.parent_id, t.due_date, t.created_by, t.assignee, t.owner, t.session_id, t.created_at, t.updated_at
+             FROM tasks_fts f
+             JOIN tasks t ON t.id = f.rowid
+             WHERE tasks_fts MATCH ?1"
+        );
+        let mut p: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(query.to_string())];
+        let mut idx = 2;
+
+        if let Some(proj) = project {
+            sql.push_str(&format!(" AND t.project = ?{}", idx));
+            p.push(Box::new(proj.to_string()));
+            idx += 1;
+        }
+
+        if let Some(st) = status {
+            sql.push_str(&format!(" AND t.status = ?{}", idx));
+            p.push(Box::new(st.to_string()));
+            idx += 1;
+        }
+
+        sql.push_str(&format!(" ORDER BY rank LIMIT ?{}", idx));
+        p.push(Box::new(limit as i64));
+
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(p.iter()), Self::row_to_task)?;
+        rows.collect()
+    }
 }
