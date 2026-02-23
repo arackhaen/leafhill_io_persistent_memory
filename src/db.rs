@@ -652,4 +652,132 @@ impl Database {
         let rows = stmt.query_map(rusqlite::params_from_iter(p.iter()), Self::row_to_task)?;
         rows.collect()
     }
+
+    // ── Task Dependencies ────────────────────────────────────────────────
+
+    pub fn add_task_dep(&self, blocker_id: i64, blocked_id: i64) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO task_deps (blocker_id, blocked_id) VALUES (?1, ?2)",
+            params![blocker_id, blocked_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn remove_task_dep(&self, blocker_id: i64, blocked_id: i64) -> rusqlite::Result<bool> {
+        let affected = self.conn.execute(
+            "DELETE FROM task_deps WHERE blocker_id = ?1 AND blocked_id = ?2",
+            params![blocker_id, blocked_id],
+        )?;
+        Ok(affected > 0)
+    }
+
+    pub fn get_task_deps(&self, task_id: i64) -> rusqlite::Result<(Vec<Task>, Vec<Task>)> {
+        // Tasks that block this task (blockers)
+        let mut stmt = self.conn.prepare(
+            "SELECT t.id, t.project, t.subject, t.description, t.status, t.priority, t.task_type, t.parent_id, t.due_date, t.created_by, t.assignee, t.owner, t.session_id, t.created_at, t.updated_at
+             FROM task_deps d JOIN tasks t ON t.id = d.blocker_id
+             WHERE d.blocked_id = ?1"
+        )?;
+        let blockers: Vec<Task> = stmt.query_map(params![task_id], Self::row_to_task)?.collect::<rusqlite::Result<_>>()?;
+
+        // Tasks blocked by this task
+        let mut stmt = self.conn.prepare(
+            "SELECT t.id, t.project, t.subject, t.description, t.status, t.priority, t.task_type, t.parent_id, t.due_date, t.created_by, t.assignee, t.owner, t.session_id, t.created_at, t.updated_at
+             FROM task_deps d JOIN tasks t ON t.id = d.blocked_id
+             WHERE d.blocker_id = ?1"
+        )?;
+        let blocked: Vec<Task> = stmt.query_map(params![task_id], Self::row_to_task)?.collect::<rusqlite::Result<_>>()?;
+
+        Ok((blockers, blocked))
+    }
+
+    // ── Links ────────────────────────────────────────────────────────────
+
+    pub fn create_link(
+        &self,
+        source_type: &str,
+        source_id: i64,
+        target_type: &str,
+        target_id: i64,
+        relation: Option<&str>,
+    ) -> rusqlite::Result<Link> {
+        self.conn.execute(
+            "INSERT INTO links (source_type, source_id, target_type, target_id, relation)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(source_type, source_id, target_type, target_id) DO UPDATE SET
+                relation = excluded.relation",
+            params![source_type, source_id, target_type, target_id, relation],
+        )?;
+        let mut stmt = self.conn.prepare(
+            "SELECT id, source_type, source_id, target_type, target_id, relation, created_at
+             FROM links WHERE source_type = ?1 AND source_id = ?2 AND target_type = ?3 AND target_id = ?4"
+        )?;
+        stmt.query_row(params![source_type, source_id, target_type, target_id], Self::row_to_link)
+    }
+
+    pub fn get_links(
+        &self,
+        entity_type: &str,
+        entity_id: i64,
+    ) -> rusqlite::Result<Vec<Link>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, source_type, source_id, target_type, target_id, relation, created_at
+             FROM links
+             WHERE (source_type = ?1 AND source_id = ?2)
+                OR (target_type = ?1 AND target_id = ?2)
+             ORDER BY created_at DESC"
+        )?;
+        let rows = stmt.query_map(params![entity_type, entity_id], Self::row_to_link)?;
+        rows.collect()
+    }
+
+    pub fn delete_link(&self, link_id: i64) -> rusqlite::Result<bool> {
+        let affected = self.conn.execute(
+            "DELETE FROM links WHERE id = ?1",
+            params![link_id],
+        )?;
+        Ok(affected > 0)
+    }
+
+    pub fn search_linked(
+        &self,
+        entity_type: &str,
+        entity_id: i64,
+        target_type: Option<&str>,
+    ) -> rusqlite::Result<Vec<Link>> {
+        let mut sql = String::from(
+            "SELECT id, source_type, source_id, target_type, target_id, relation, created_at
+             FROM links
+             WHERE (source_type = ?1 AND source_id = ?2)"
+        );
+        let mut p: Vec<Box<dyn rusqlite::types::ToSql>> = vec![
+            Box::new(entity_type.to_string()),
+            Box::new(entity_id),
+        ];
+        let mut idx = 3;
+
+        if let Some(tt) = target_type {
+            sql.push_str(&format!(" AND target_type = ?{}", idx));
+            p.push(Box::new(tt.to_string()));
+            idx += 1;
+            // Also check reverse direction with target_type filter
+            sql.push_str(&format!(
+                " UNION SELECT id, source_type, source_id, target_type, target_id, relation, created_at
+                 FROM links WHERE target_type = ?1 AND target_id = ?2 AND source_type = ?{}",
+                idx
+            ));
+            p.push(Box::new(tt.to_string()));
+        } else {
+            sql.push_str(
+                " UNION SELECT id, source_type, source_id, target_type, target_id, relation, created_at
+                 FROM links WHERE target_type = ?1 AND target_id = ?2"
+            );
+        }
+
+        sql.push_str(" ORDER BY created_at DESC");
+
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(p.iter()), Self::row_to_link)?;
+        rows.collect()
+    }
 }
