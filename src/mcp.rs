@@ -253,6 +253,99 @@ fn handle_tools_list(id: &Value) -> Value {
                         },
                         "required": ["session_id"]
                     }
+                },
+                {
+                    "name": "create_task",
+                    "description": "Create a persistent task. Tasks survive across sessions and can be linked to conversations and memories.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "project": { "type": "string", "description": "Project scope (e.g. 'myapp')" },
+                            "subject": { "type": "string", "description": "Short task title in imperative form" },
+                            "description": { "type": "string", "description": "Detailed requirements and context" },
+                            "priority": { "type": "string", "description": "low, medium, or high (default: medium)" },
+                            "task_type": { "type": "string", "description": "claude, human, or hybrid (default: claude)" },
+                            "parent_id": { "type": "integer", "description": "Parent task ID for subtasks" },
+                            "due_date": { "type": "string", "description": "ISO date (YYYY-MM-DD)" },
+                            "created_by": { "type": "string", "description": "Session ID or human name/email" },
+                            "assignee": { "type": "string", "description": "Who does the work" },
+                            "owner": { "type": "string", "description": "Who owns/approves the task" },
+                            "session_id": { "type": "string", "description": "Claude session ID" }
+                        },
+                        "required": ["project", "subject"]
+                    }
+                },
+                {
+                    "name": "update_task",
+                    "description": "Update a task's fields. Only provided fields are changed.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "task_id": { "type": "integer", "description": "Task ID to update" },
+                            "subject": { "type": "string", "description": "New subject" },
+                            "description": { "type": "string", "description": "New description" },
+                            "status": { "type": "string", "description": "pending, in_progress, completed, blocked, or deleted" },
+                            "priority": { "type": "string", "description": "low, medium, or high" },
+                            "task_type": { "type": "string", "description": "claude, human, or hybrid" },
+                            "assignee": { "type": "string", "description": "New assignee" },
+                            "owner": { "type": "string", "description": "New owner" },
+                            "due_date": { "type": "string", "description": "New due date (YYYY-MM-DD)" },
+                            "session_id": { "type": "string", "description": "Claude session that last touched this" }
+                        },
+                        "required": ["task_id"]
+                    }
+                },
+                {
+                    "name": "get_task",
+                    "description": "Get a task by ID with its dependencies and linked entities.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "task_id": { "type": "integer", "description": "Task ID" }
+                        },
+                        "required": ["task_id"]
+                    }
+                },
+                {
+                    "name": "list_tasks",
+                    "description": "List tasks with optional filters. Excludes deleted tasks unless status=deleted is specified.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "project": { "type": "string", "description": "Filter by project" },
+                            "status": { "type": "string", "description": "Filter by status" },
+                            "assignee": { "type": "string", "description": "Filter by assignee" },
+                            "task_type": { "type": "string", "description": "Filter by type: claude, human, hybrid" },
+                            "priority": { "type": "string", "description": "Filter by priority" },
+                            "limit": { "type": "integer", "description": "Max results (default 50)" }
+                        },
+                        "required": []
+                    }
+                },
+                {
+                    "name": "search_tasks",
+                    "description": "Full-text search across task subjects and descriptions.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "query": { "type": "string", "description": "Search query" },
+                            "project": { "type": "string", "description": "Filter by project" },
+                            "status": { "type": "string", "description": "Filter by status" },
+                            "limit": { "type": "integer", "description": "Max results (default 20)" }
+                        },
+                        "required": ["query"]
+                    }
+                },
+                {
+                    "name": "delete_task",
+                    "description": "Soft-delete a task (sets status to 'deleted').",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "task_id": { "type": "integer", "description": "Task ID to delete" }
+                        },
+                        "required": ["task_id"]
+                    }
                 }
             ]
         }
@@ -271,6 +364,12 @@ fn handle_tools_call(id: &Value, params: &Value, db: &Database) -> Value {
         "log_conversation" => tool_log_conversation(&args, db),
         "search_conversations" => tool_search_conversations(&args, db),
         "get_conversation_context" => tool_get_conversation_context(&args, db),
+        "create_task" => tool_create_task(&args, db),
+        "update_task" => tool_update_task(&args, db),
+        "get_task" => tool_get_task(&args, db),
+        "list_tasks" => tool_list_tasks(&args, db),
+        "search_tasks" => tool_search_tasks(&args, db),
+        "delete_task" => tool_delete_task(&args, db),
         _ => Err(format!("Unknown tool: {}", tool_name)),
     };
 
@@ -411,4 +510,108 @@ fn tool_get_conversation_context(args: &Value, db: &Database) -> Result<String, 
             entries.len(),
             serde_json::to_string_pretty(&entries).unwrap_or_default()))
     }
+}
+
+fn tool_create_task(args: &Value, db: &Database) -> Result<String, String> {
+    let project = args.get("project").and_then(|v| v.as_str())
+        .ok_or("missing 'project'")?;
+    let subject = args.get("subject").and_then(|v| v.as_str())
+        .ok_or("missing 'subject'")?;
+    let description = args.get("description").and_then(|v| v.as_str());
+    let priority = args.get("priority").and_then(|v| v.as_str());
+    let task_type = args.get("task_type").and_then(|v| v.as_str());
+    let parent_id = args.get("parent_id").and_then(|v| v.as_i64());
+    let due_date = args.get("due_date").and_then(|v| v.as_str());
+    let created_by = args.get("created_by").and_then(|v| v.as_str());
+    let assignee = args.get("assignee").and_then(|v| v.as_str());
+    let owner = args.get("owner").and_then(|v| v.as_str());
+    let session_id = args.get("session_id").and_then(|v| v.as_str());
+
+    let task = db.create_task(project, subject, description, priority, task_type,
+        parent_id, due_date, created_by, assignee, owner, session_id)
+        .map_err(|e| format!("DB error: {}", e))?;
+
+    Ok(serde_json::to_string_pretty(&task).unwrap_or_default())
+}
+
+fn tool_update_task(args: &Value, db: &Database) -> Result<String, String> {
+    let task_id = args.get("task_id").and_then(|v| v.as_i64())
+        .ok_or("missing 'task_id'")?;
+
+    let task = db.update_task(task_id, args)
+        .map_err(|e| format!("DB error: {}", e))?;
+
+    Ok(serde_json::to_string_pretty(&task).unwrap_or_default())
+}
+
+fn tool_get_task(args: &Value, db: &Database) -> Result<String, String> {
+    let task_id = args.get("task_id").and_then(|v| v.as_i64())
+        .ok_or("missing 'task_id'")?;
+
+    let task = db.get_task(task_id)
+        .map_err(|e| format!("DB error: {}", e))?;
+    let (blockers, blocked) = db.get_task_deps(task_id)
+        .map_err(|e| format!("DB error: {}", e))?;
+    let links = db.get_links("task", task_id)
+        .map_err(|e| format!("DB error: {}", e))?;
+
+    let result = serde_json::json!({
+        "task": task,
+        "blocked_by": blockers,
+        "blocks": blocked,
+        "links": links,
+    });
+
+    Ok(serde_json::to_string_pretty(&result).unwrap_or_default())
+}
+
+fn tool_list_tasks(args: &Value, db: &Database) -> Result<String, String> {
+    let project = args.get("project").and_then(|v| v.as_str());
+    let status = args.get("status").and_then(|v| v.as_str());
+    let assignee = args.get("assignee").and_then(|v| v.as_str());
+    let task_type = args.get("task_type").and_then(|v| v.as_str());
+    let priority = args.get("priority").and_then(|v| v.as_str());
+    let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(50) as usize;
+
+    let tasks = db.list_tasks(project, status, assignee, task_type, priority, limit)
+        .map_err(|e| format!("List error: {}", e))?;
+
+    if tasks.is_empty() {
+        Ok("No tasks found.".to_string())
+    } else {
+        Ok(format!("Found {} tasks:\n{}",
+            tasks.len(),
+            serde_json::to_string_pretty(&tasks).unwrap_or_default()))
+    }
+}
+
+fn tool_search_tasks(args: &Value, db: &Database) -> Result<String, String> {
+    let query = args.get("query").and_then(|v| v.as_str())
+        .ok_or("missing 'query'")?;
+    let project = args.get("project").and_then(|v| v.as_str());
+    let status = args.get("status").and_then(|v| v.as_str());
+    let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(20) as usize;
+
+    let tasks = db.search_tasks(query, project, status, limit)
+        .map_err(|e| format!("Search error: {}", e))?;
+
+    if tasks.is_empty() {
+        Ok("No tasks found matching the query.".to_string())
+    } else {
+        Ok(format!("Found {} tasks:\n{}",
+            tasks.len(),
+            serde_json::to_string_pretty(&tasks).unwrap_or_default()))
+    }
+}
+
+fn tool_delete_task(args: &Value, db: &Database) -> Result<String, String> {
+    let task_id = args.get("task_id").and_then(|v| v.as_i64())
+        .ok_or("missing 'task_id'")?;
+
+    let updates = serde_json::json!({"status": "deleted"});
+    let task = db.update_task(task_id, &updates)
+        .map_err(|e| format!("DB error: {}", e))?;
+
+    Ok(format!("Task {} deleted.\n{}", task_id,
+        serde_json::to_string_pretty(&task).unwrap_or_default()))
 }
