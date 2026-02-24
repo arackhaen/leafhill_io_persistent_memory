@@ -68,6 +68,12 @@ pub enum Commands {
         command: TaskCommands,
     },
 
+    /// Link management (semantic connections between entities)
+    Link {
+        #[command(subcommand)]
+        command: LinkCommands,
+    },
+
     /// Conversation log operations
     Log {
         #[command(subcommand)]
@@ -252,6 +258,38 @@ pub enum TaskCommands {
         blocker: i64,
         /// Blocked task ID
         blocked: i64,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum LinkCommands {
+    /// Create a link between two entities
+    Create {
+        /// Source entity type (task, memory, conversation)
+        source_type: String,
+        /// Source entity ID
+        source_id: i64,
+        /// Target entity type (task, memory, conversation)
+        target_type: String,
+        /// Target entity ID
+        target_id: i64,
+        /// Relation label (discusses, relates_to, caused_by, resolves, etc.)
+        #[arg(long, short)]
+        relation: Option<String>,
+    },
+
+    /// List links for an entity
+    List {
+        /// Entity type (task, memory, conversation)
+        entity_type: String,
+        /// Entity ID
+        entity_id: i64,
+    },
+
+    /// Delete a link
+    Delete {
+        /// Link ID
+        link_id: i64,
     },
 }
 
@@ -461,6 +499,35 @@ pub fn run_cli(command: Commands, db_path: &PathBuf) {
             }
         },
 
+        Commands::Link { command: link_cmd } => match link_cmd {
+            LinkCommands::Create { source_type, source_id, target_type, target_id, relation } => {
+                match db.create_link(&source_type, source_id, &target_type, target_id, relation.as_deref()) {
+                    Ok(link) => print_link(&link),
+                    Err(e) => { eprintln!("Failed to create link: {}", e); std::process::exit(1); }
+                }
+            }
+            LinkCommands::List { entity_type, entity_id } => {
+                match db.get_links(&entity_type, entity_id) {
+                    Ok(links) => {
+                        if links.is_empty() {
+                            println!("No links found.");
+                        } else {
+                            for l in &links { print_link(l); }
+                            println!("\n({} links)", links.len());
+                        }
+                    }
+                    Err(e) => { eprintln!("List failed: {}", e); std::process::exit(1); }
+                }
+            }
+            LinkCommands::Delete { link_id } => {
+                match db.delete_link(link_id) {
+                    Ok(true) => println!("Link {} deleted.", link_id),
+                    Ok(false) => { eprintln!("Link not found: {}", link_id); std::process::exit(1); }
+                    Err(e) => { eprintln!("Delete failed: {}", e); std::process::exit(1); }
+                }
+            }
+        },
+
         Commands::Log { command: log_cmd } => match log_cmd {
             LogCommands::Search { query, session, entry_type, limit } => {
                 match db.search_conversations(&query, session.as_deref(), entry_type.as_deref(), limit) {
@@ -582,4 +649,13 @@ fn print_task_short(task: &crate::db::Task) {
     println!("  #{:<4} [{}] {:<10} {:<6} {:<8} {}",
         task.id, task.status, task.project, priority, assignee,
         if ttype != "-" { format!("[{}] {}", ttype, task.subject) } else { task.subject.clone() });
+}
+
+fn print_link(link: &crate::db::Link) {
+    let rel = link.relation.as_deref().unwrap_or("linked");
+    println!("---");
+    println!("Link #{}: {}:{} --[{}]--> {}:{}",
+        link.id, link.source_type, link.source_id, rel,
+        link.target_type, link.target_id);
+    println!("  Created: {}", link.created_at);
 }
