@@ -346,6 +346,81 @@ fn handle_tools_list(id: &Value) -> Value {
                         },
                         "required": ["task_id"]
                     }
+                },
+                {
+                    "name": "add_task_dep",
+                    "description": "Add a dependency: blocker must complete before blocked can start.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "blocker_id": { "type": "integer", "description": "Task ID that must complete first" },
+                            "blocked_id": { "type": "integer", "description": "Task ID that's waiting" }
+                        },
+                        "required": ["blocker_id", "blocked_id"]
+                    }
+                },
+                {
+                    "name": "remove_task_dep",
+                    "description": "Remove a dependency between two tasks.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "blocker_id": { "type": "integer", "description": "Blocker task ID" },
+                            "blocked_id": { "type": "integer", "description": "Blocked task ID" }
+                        },
+                        "required": ["blocker_id", "blocked_id"]
+                    }
+                },
+                {
+                    "name": "create_link",
+                    "description": "Link any two entities (task, memory, conversation). Creates a semantic connection with an optional relation label.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "source_type": { "type": "string", "description": "Entity type: task, memory, or conversation" },
+                            "source_id": { "type": "integer", "description": "Source entity ID" },
+                            "target_type": { "type": "string", "description": "Entity type: task, memory, or conversation" },
+                            "target_id": { "type": "integer", "description": "Target entity ID" },
+                            "relation": { "type": "string", "description": "Relation label: discusses, relates_to, caused_by, resolves, requires_input, etc." }
+                        },
+                        "required": ["source_type", "source_id", "target_type", "target_id"]
+                    }
+                },
+                {
+                    "name": "get_links",
+                    "description": "Get all links for an entity (both directions).",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "entity_type": { "type": "string", "description": "Entity type: task, memory, or conversation" },
+                            "entity_id": { "type": "integer", "description": "Entity ID" }
+                        },
+                        "required": ["entity_type", "entity_id"]
+                    }
+                },
+                {
+                    "name": "delete_link",
+                    "description": "Delete a link by its ID.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "link_id": { "type": "integer", "description": "Link ID to delete" }
+                        },
+                        "required": ["link_id"]
+                    }
+                },
+                {
+                    "name": "search_linked",
+                    "description": "Find all entities linked to a given entity, optionally filtered by target type.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "entity_type": { "type": "string", "description": "Source entity type" },
+                            "entity_id": { "type": "integer", "description": "Source entity ID" },
+                            "target_type": { "type": "string", "description": "Filter linked entities by type" }
+                        },
+                        "required": ["entity_type", "entity_id"]
+                    }
                 }
             ]
         }
@@ -370,6 +445,12 @@ fn handle_tools_call(id: &Value, params: &Value, db: &Database) -> Value {
         "list_tasks" => tool_list_tasks(&args, db),
         "search_tasks" => tool_search_tasks(&args, db),
         "delete_task" => tool_delete_task(&args, db),
+        "add_task_dep" => tool_add_task_dep(&args, db),
+        "remove_task_dep" => tool_remove_task_dep(&args, db),
+        "create_link" => tool_create_link(&args, db),
+        "get_links" => tool_get_links(&args, db),
+        "delete_link" => tool_delete_link(&args, db),
+        "search_linked" => tool_search_linked(&args, db),
         _ => Err(format!("Unknown tool: {}", tool_name)),
     };
 
@@ -614,4 +695,100 @@ fn tool_delete_task(args: &Value, db: &Database) -> Result<String, String> {
 
     Ok(format!("Task {} deleted.\n{}", task_id,
         serde_json::to_string_pretty(&task).unwrap_or_default()))
+}
+
+fn tool_add_task_dep(args: &Value, db: &Database) -> Result<String, String> {
+    let blocker_id = args.get("blocker_id").and_then(|v| v.as_i64())
+        .ok_or("missing 'blocker_id'")?;
+    let blocked_id = args.get("blocked_id").and_then(|v| v.as_i64())
+        .ok_or("missing 'blocked_id'")?;
+
+    db.add_task_dep(blocker_id, blocked_id)
+        .map_err(|e| format!("DB error: {}", e))?;
+
+    Ok(format!("Dependency added: task {} blocks task {}", blocker_id, blocked_id))
+}
+
+fn tool_remove_task_dep(args: &Value, db: &Database) -> Result<String, String> {
+    let blocker_id = args.get("blocker_id").and_then(|v| v.as_i64())
+        .ok_or("missing 'blocker_id'")?;
+    let blocked_id = args.get("blocked_id").and_then(|v| v.as_i64())
+        .ok_or("missing 'blocked_id'")?;
+
+    let removed = db.remove_task_dep(blocker_id, blocked_id)
+        .map_err(|e| format!("DB error: {}", e))?;
+
+    if removed {
+        Ok(format!("Dependency removed: task {} no longer blocks task {}", blocker_id, blocked_id))
+    } else {
+        Err(format!("Dependency not found: {} -> {}", blocker_id, blocked_id))
+    }
+}
+
+fn tool_create_link(args: &Value, db: &Database) -> Result<String, String> {
+    let source_type = args.get("source_type").and_then(|v| v.as_str())
+        .ok_or("missing 'source_type'")?;
+    let source_id = args.get("source_id").and_then(|v| v.as_i64())
+        .ok_or("missing 'source_id'")?;
+    let target_type = args.get("target_type").and_then(|v| v.as_str())
+        .ok_or("missing 'target_type'")?;
+    let target_id = args.get("target_id").and_then(|v| v.as_i64())
+        .ok_or("missing 'target_id'")?;
+    let relation = args.get("relation").and_then(|v| v.as_str());
+
+    let link = db.create_link(source_type, source_id, target_type, target_id, relation)
+        .map_err(|e| format!("DB error: {}", e))?;
+
+    Ok(serde_json::to_string_pretty(&link).unwrap_or_default())
+}
+
+fn tool_get_links(args: &Value, db: &Database) -> Result<String, String> {
+    let entity_type = args.get("entity_type").and_then(|v| v.as_str())
+        .ok_or("missing 'entity_type'")?;
+    let entity_id = args.get("entity_id").and_then(|v| v.as_i64())
+        .ok_or("missing 'entity_id'")?;
+
+    let links = db.get_links(entity_type, entity_id)
+        .map_err(|e| format!("DB error: {}", e))?;
+
+    if links.is_empty() {
+        Ok("No links found for this entity.".to_string())
+    } else {
+        Ok(format!("Found {} links:\n{}",
+            links.len(),
+            serde_json::to_string_pretty(&links).unwrap_or_default()))
+    }
+}
+
+fn tool_delete_link(args: &Value, db: &Database) -> Result<String, String> {
+    let link_id = args.get("link_id").and_then(|v| v.as_i64())
+        .ok_or("missing 'link_id'")?;
+
+    let deleted = db.delete_link(link_id)
+        .map_err(|e| format!("DB error: {}", e))?;
+
+    if deleted {
+        Ok(format!("Link {} deleted.", link_id))
+    } else {
+        Err(format!("Link not found: {}", link_id))
+    }
+}
+
+fn tool_search_linked(args: &Value, db: &Database) -> Result<String, String> {
+    let entity_type = args.get("entity_type").and_then(|v| v.as_str())
+        .ok_or("missing 'entity_type'")?;
+    let entity_id = args.get("entity_id").and_then(|v| v.as_i64())
+        .ok_or("missing 'entity_id'")?;
+    let target_type = args.get("target_type").and_then(|v| v.as_str());
+
+    let links = db.search_linked(entity_type, entity_id, target_type)
+        .map_err(|e| format!("Search error: {}", e))?;
+
+    if links.is_empty() {
+        Ok("No linked entities found.".to_string())
+    } else {
+        Ok(format!("Found {} linked entities:\n{}",
+            links.len(),
+            serde_json::to_string_pretty(&links).unwrap_or_default()))
+    }
 }
