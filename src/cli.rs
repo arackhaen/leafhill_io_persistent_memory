@@ -62,6 +62,12 @@ pub enum Commands {
     /// Handle Claude Code hook events (reads JSON from stdin)
     HookHandler,
 
+    /// Task management operations
+    Task {
+        #[command(subcommand)]
+        command: TaskCommands,
+    },
+
     /// Conversation log operations
     Log {
         #[command(subcommand)]
@@ -116,6 +122,136 @@ pub enum LogCommands {
         /// Only prune entries of this type
         #[arg(long, name = "type")]
         entry_type: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum TaskCommands {
+    /// Create a new task
+    Create {
+        /// Project name
+        project: String,
+        /// Task subject (short title)
+        subject: String,
+        /// Detailed description
+        #[arg(long, short)]
+        description: Option<String>,
+        /// Priority: low, medium, high
+        #[arg(long, short)]
+        priority: Option<String>,
+        /// Type: claude, human, hybrid
+        #[arg(long, name = "type")]
+        task_type: Option<String>,
+        /// Assignee name or email
+        #[arg(long, short)]
+        assignee: Option<String>,
+        /// Owner name or email
+        #[arg(long, short)]
+        owner: Option<String>,
+        /// Due date (YYYY-MM-DD)
+        #[arg(long)]
+        due: Option<String>,
+        /// Parent task ID (for subtasks)
+        #[arg(long)]
+        parent: Option<i64>,
+    },
+
+    /// List tasks with filters
+    List {
+        /// Filter by project
+        #[arg(long, short)]
+        project: Option<String>,
+        /// Filter by status
+        #[arg(long, short)]
+        status: Option<String>,
+        /// Filter by assignee
+        #[arg(long, short)]
+        assignee: Option<String>,
+        /// Filter by type
+        #[arg(long, name = "type")]
+        task_type: Option<String>,
+        /// Filter by priority
+        #[arg(long)]
+        priority: Option<String>,
+        /// Max results
+        #[arg(long, short, default_value = "50")]
+        limit: usize,
+    },
+
+    /// Get a task by ID (with deps and links)
+    Get {
+        /// Task ID
+        id: i64,
+    },
+
+    /// Update a task
+    Update {
+        /// Task ID
+        id: i64,
+        /// New status
+        #[arg(long, short)]
+        status: Option<String>,
+        /// New subject
+        #[arg(long)]
+        subject: Option<String>,
+        /// New description
+        #[arg(long, short)]
+        description: Option<String>,
+        /// New assignee
+        #[arg(long, short)]
+        assignee: Option<String>,
+        /// New owner
+        #[arg(long, short)]
+        owner: Option<String>,
+        /// New priority
+        #[arg(long, short)]
+        priority: Option<String>,
+        /// New due date
+        #[arg(long)]
+        due: Option<String>,
+    },
+
+    /// Search tasks by text
+    Search {
+        /// Search query
+        query: String,
+        /// Filter by project
+        #[arg(long, short)]
+        project: Option<String>,
+        /// Filter by status
+        #[arg(long, short)]
+        status: Option<String>,
+        /// Max results
+        #[arg(long, short, default_value = "20")]
+        limit: usize,
+    },
+
+    /// Delete a task (soft-delete)
+    Delete {
+        /// Task ID
+        id: i64,
+    },
+
+    /// Show dependencies for a task
+    Deps {
+        /// Task ID
+        id: i64,
+    },
+
+    /// Add a dependency between tasks
+    AddDep {
+        /// Blocker task ID
+        blocker: i64,
+        /// Blocked task ID
+        blocked: i64,
+    },
+
+    /// Remove a dependency between tasks
+    RemoveDep {
+        /// Blocker task ID
+        blocker: i64,
+        /// Blocked task ID
+        blocked: i64,
     },
 }
 
@@ -203,6 +339,127 @@ pub fn run_cli(command: Commands, db_path: &PathBuf) {
                 }
             }
         }
+
+        Commands::Task { command: task_cmd } => match task_cmd {
+            TaskCommands::Create { project, subject, description, priority, task_type, assignee, owner, due, parent } => {
+                match db.create_task(&project, &subject, description.as_deref(), priority.as_deref(),
+                    task_type.as_deref(), parent, due.as_deref(), None, assignee.as_deref(),
+                    owner.as_deref(), None)
+                {
+                    Ok(task) => print_task(&task),
+                    Err(e) => { eprintln!("Failed to create task: {}", e); std::process::exit(1); }
+                }
+            }
+            TaskCommands::List { project, status, assignee, task_type, priority, limit } => {
+                match db.list_tasks(project.as_deref(), status.as_deref(), assignee.as_deref(),
+                    task_type.as_deref(), priority.as_deref(), limit)
+                {
+                    Ok(tasks) => {
+                        if tasks.is_empty() {
+                            println!("No tasks found.");
+                        } else {
+                            for t in &tasks { print_task_short(t); }
+                            println!("\n({} tasks)", tasks.len());
+                        }
+                    }
+                    Err(e) => { eprintln!("List failed: {}", e); std::process::exit(1); }
+                }
+            }
+            TaskCommands::Get { id } => {
+                match db.get_task(id) {
+                    Ok(task) => {
+                        print_task(&task);
+                        if let Ok((blockers, blocked)) = db.get_task_deps(id) {
+                            if !blockers.is_empty() {
+                                println!("  Blocked by:");
+                                for t in &blockers { println!("    #{}: {} [{}]", t.id, t.subject, t.status); }
+                            }
+                            if !blocked.is_empty() {
+                                println!("  Blocks:");
+                                for t in &blocked { println!("    #{}: {} [{}]", t.id, t.subject, t.status); }
+                            }
+                        }
+                        if let Ok(links) = db.get_links("task", id) {
+                            if !links.is_empty() {
+                                println!("  Links:");
+                                for l in &links {
+                                    let rel = l.relation.as_deref().unwrap_or("linked");
+                                    println!("    {} {}:{} -> {}:{}", rel, l.source_type, l.source_id, l.target_type, l.target_id);
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => { eprintln!("Task not found: {}", e); std::process::exit(1); }
+                }
+            }
+            TaskCommands::Update { id, status, subject, description, assignee, owner, priority, due } => {
+                let mut updates = serde_json::Map::new();
+                if let Some(v) = status { updates.insert("status".into(), serde_json::Value::String(v)); }
+                if let Some(v) = subject { updates.insert("subject".into(), serde_json::Value::String(v)); }
+                if let Some(v) = description { updates.insert("description".into(), serde_json::Value::String(v)); }
+                if let Some(v) = assignee { updates.insert("assignee".into(), serde_json::Value::String(v)); }
+                if let Some(v) = owner { updates.insert("owner".into(), serde_json::Value::String(v)); }
+                if let Some(v) = priority { updates.insert("priority".into(), serde_json::Value::String(v)); }
+                if let Some(v) = due { updates.insert("due_date".into(), serde_json::Value::String(v)); }
+                let updates = serde_json::Value::Object(updates);
+                match db.update_task(id, &updates) {
+                    Ok(task) => { println!("Updated:"); print_task(&task); }
+                    Err(e) => { eprintln!("Update failed: {}", e); std::process::exit(1); }
+                }
+            }
+            TaskCommands::Search { query, project, status, limit } => {
+                match db.search_tasks(&query, project.as_deref(), status.as_deref(), limit) {
+                    Ok(tasks) => {
+                        if tasks.is_empty() {
+                            println!("No tasks found.");
+                        } else {
+                            for t in &tasks { print_task_short(t); }
+                            println!("\n({} results)", tasks.len());
+                        }
+                    }
+                    Err(e) => { eprintln!("Search failed: {}", e); std::process::exit(1); }
+                }
+            }
+            TaskCommands::Delete { id } => {
+                let updates = serde_json::json!({"status": "deleted"});
+                match db.update_task(id, &updates) {
+                    Ok(_) => println!("Task {} deleted.", id),
+                    Err(e) => { eprintln!("Delete failed: {}", e); std::process::exit(1); }
+                }
+            }
+            TaskCommands::Deps { id } => {
+                match db.get_task_deps(id) {
+                    Ok((blockers, blocked)) => {
+                        if blockers.is_empty() && blocked.is_empty() {
+                            println!("No dependencies for task {}.", id);
+                        } else {
+                            if !blockers.is_empty() {
+                                println!("Blocked by:");
+                                for t in &blockers { println!("  #{}: {} [{}]", t.id, t.subject, t.status); }
+                            }
+                            if !blocked.is_empty() {
+                                println!("Blocks:");
+                                for t in &blocked { println!("  #{}: {} [{}]", t.id, t.subject, t.status); }
+                            }
+                        }
+                    }
+                    Err(e) => { eprintln!("Failed: {}", e); std::process::exit(1); }
+                }
+            }
+            TaskCommands::AddDep { blocker, blocked } => {
+                match db.add_task_dep(blocker, blocked) {
+                    Ok(()) => println!("Dependency added: task {} blocks task {}", blocker, blocked),
+                    Err(e) => { eprintln!("Failed: {}", e); std::process::exit(1); }
+                }
+            }
+            TaskCommands::RemoveDep { blocker, blocked } => {
+                match db.remove_task_dep(blocker, blocked) {
+                    Ok(true) => println!("Dependency removed."),
+                    Ok(false) => { eprintln!("Dependency not found."); std::process::exit(1); }
+                    Err(e) => { eprintln!("Failed: {}", e); std::process::exit(1); }
+                }
+            }
+        },
 
         Commands::Log { command: log_cmd } => match log_cmd {
             LogCommands::Search { query, session, entry_type, limit } => {
@@ -299,4 +556,30 @@ fn print_conversation(entry: &crate::db::ConversationEntry) {
     } else {
         println!("  {}", preview);
     }
+}
+
+fn print_task(task: &crate::db::Task) {
+    println!("---");
+    println!("#{} [{}] {} ({})", task.id, task.status, task.subject, task.project);
+    if let Some(desc) = &task.description {
+        println!("  {}", desc);
+    }
+    if let Some(p) = &task.priority { println!("  Priority: {}", p); }
+    if let Some(tt) = &task.task_type { println!("  Type: {}", tt); }
+    if let Some(a) = &task.assignee { println!("  Assignee: {}", a); }
+    if let Some(o) = &task.owner { println!("  Owner: {}", o); }
+    if let Some(d) = &task.due_date { println!("  Due: {}", d); }
+    if let Some(pid) = &task.parent_id { println!("  Parent: #{}", pid); }
+    if let Some(cb) = &task.created_by { println!("  Created by: {}", cb); }
+    if let Some(sid) = &task.session_id { println!("  Session: {}", sid); }
+    println!("  Created: {}  Updated: {}", task.created_at, task.updated_at);
+}
+
+fn print_task_short(task: &crate::db::Task) {
+    let priority = task.priority.as_deref().unwrap_or("-");
+    let assignee = task.assignee.as_deref().unwrap_or("-");
+    let ttype = task.task_type.as_deref().unwrap_or("-");
+    println!("  #{:<4} [{}] {:<10} {:<6} {:<8} {}",
+        task.id, task.status, task.project, priority, assignee,
+        if ttype != "-" { format!("[{}] {}", ttype, task.subject) } else { task.subject.clone() });
 }
