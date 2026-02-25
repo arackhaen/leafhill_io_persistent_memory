@@ -24,6 +24,12 @@ fn create_tables_ddl() -> Vec<(&'static str, &'static str)> {
                 project TEXT, \
                 entry_type TEXT, \
                 raw_id BIGINT, \
+                model TEXT, \
+                input_tokens BIGINT, \
+                output_tokens BIGINT, \
+                cache_creation_tokens BIGINT, \
+                cache_read_tokens BIGINT, \
+                message_timestamp TEXT, \
                 created_at TEXT NOT NULL)"),
         ("tasks",
             "CREATE TABLE IF NOT EXISTS tasks (\
@@ -90,8 +96,10 @@ async fn export_table(
         }
         "conversations" => {
             let stmt = client.prepare(
-                "INSERT INTO conversations (id, session_id, role, content, project, entry_type, raw_id, created_at) \
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8) ON CONFLICT DO NOTHING"
+                "INSERT INTO conversations (id, session_id, role, content, project, entry_type, raw_id, \
+                 model, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, \
+                 message_timestamp, created_at) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14) ON CONFLICT DO NOTHING"
             ).await.map_err(|e| format!("Failed to prepare conversations insert: {}", e))?;
 
             let entries = db.export_all_conversations()
@@ -100,7 +108,10 @@ async fn export_table(
             for entry in &entries {
                 let rows = client.execute(&stmt, &[
                     &entry.id, &entry.session_id, &entry.role, &entry.content,
-                    &entry.project, &entry.entry_type, &entry.raw_id, &entry.created_at,
+                    &entry.project, &entry.entry_type, &entry.raw_id,
+                    &entry.model, &entry.input_tokens, &entry.output_tokens,
+                    &entry.cache_creation_tokens, &entry.cache_read_tokens,
+                    &entry.message_timestamp, &entry.created_at,
                 ]).await.map_err(|e| format!("Failed to insert conversation {}: {}", entry.id, e))?;
                 if rows > 0 { inserted += 1; } else { skipped += 1; }
             }

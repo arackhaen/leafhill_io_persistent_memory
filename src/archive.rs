@@ -267,9 +267,9 @@ pub fn run_archive_create(
         println!("    links: {}", envelope.counts.links);
     }
     if keep {
-        println!("  Source data retained (--keep).");
+        println!("  Source data retained.");
     } else {
-        println!("  Source data removed from database.");
+        println!("  Source data removed from database (--purge).");
     }
 
     Ok(())

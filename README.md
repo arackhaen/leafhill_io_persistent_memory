@@ -11,6 +11,7 @@ Persistent Memory for Claude Code — a Rust MCP server providing persistent mem
 - **Backup** — Create SQLite backup copies of the database
 - **Archive** — Export entities to JSON files with optional restore
 - **RDBMS export** — Export data to PostgreSQL for external analysis
+- **PreCompact transcript storage** — Automatically preserve full session transcripts before context compaction
 
 ## Installation
 
@@ -45,17 +46,17 @@ leafhill-persistent-memory backup /path/to/backup.db --force  # overwrite existi
 
 #### Archive
 
-Export entities to a JSON file (default: moves data out of the database):
+Export entities to a JSON file (default: non-destructive, data stays in the database):
 
 ```bash
 # Archive all memories
 leafhill-persistent-memory archive create /path/to/archive.json --entity-type memories
 
-# Archive tasks for a specific project, keeping originals
-leafhill-persistent-memory archive create /path/to/archive.json --entity-type tasks --project myproject --keep
+# Archive tasks for a specific project
+leafhill-persistent-memory archive create /path/to/archive.json --entity-type tasks --project myproject
 
-# Archive conversations by date range
-leafhill-persistent-memory archive create /path/to/archive.json --entity-type conversations --before 2026-01-01
+# Archive conversations older than 30 days
+leafhill-persistent-memory archive create /path/to/archive.json --entity-type conversations --older-than 30
 
 # Restore from archive (merge with skip-duplicates)
 leafhill-persistent-memory archive restore /path/to/archive.json
@@ -64,6 +65,8 @@ leafhill-persistent-memory archive restore /path/to/archive.json
 Supported entity types: `memories`, `conversations`, `tasks`, `all`
 
 Archive cascades automatically: archiving a task includes its subtasks, dependencies, and related links.
+
+Use `--purge` to remove source data from the database after archiving.
 
 #### Export to PostgreSQL
 
@@ -78,6 +81,65 @@ leafhill-persistent-memory export "postgres://user:pass@host/db" --tables "memor
 ```
 
 Uses `ON CONFLICT DO NOTHING` — safe to run repeatedly (idempotent). Tables are created automatically if they don't exist.
+
+#### Hook Handler
+
+The binary doubles as a Claude Code hook handler for automatic conversation capture:
+
+```bash
+leafhill-persistent-memory hook-handler
+```
+
+Reads hook event JSON from stdin. Supports these events:
+
+- **SessionStart** — Injects session ID and project context into the conversation
+- **UserPromptSubmit** — Logs raw user prompts
+- **Stop** — Logs raw assistant responses
+- **PreCompact** — Stores the full session transcript before context compaction
+
+##### PreCompact Transcript Storage
+
+When Claude Code auto-compacts context, the PreCompact hook preserves the complete transcript to SQLite. Each user/assistant message becomes a separate searchable entry with `entry_type='pre_compact'`.
+
+Stored metadata per message:
+- `model` — Model identifier (e.g., `claude-opus-4-6`)
+- `input_tokens`, `output_tokens` — Token usage
+- `cache_creation_tokens`, `cache_read_tokens` — Cache token accounting
+- `message_timestamp` — Original ISO 8601 timestamp from the transcript
+
+Content extraction rules:
+- User string messages: stored as-is
+- User tool_result arrays: text content extracted
+- Assistant messages: text and thinking blocks stored, tool_use blocks skipped
+
+All error paths exit 0 (PreCompact never blocks compaction).
+
+Configure in `~/.claude/settings.json`:
+
+```json
+{
+  "hooks": {
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/path/to/leafhill-persistent-memory hook-handler",
+            "timeout": 600
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+Query stored transcripts:
+
+```bash
+leafhill-persistent-memory log list --entry-type pre_compact
+leafhill-persistent-memory log search "search term"
+```
 
 #### Other CLI Commands
 

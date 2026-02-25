@@ -1,8 +1,8 @@
 use serde_json::Value;
-use std::io::{self, Read};
+use std::io::{self, BufRead, Read};
 use std::path::PathBuf;
 
-use crate::db::Database;
+use crate::db::{Database, PreCompactMessage};
 
 /// Extract project name from cwd path.
 fn project_from_cwd(cwd: &str) -> &str {
@@ -97,8 +97,170 @@ pub fn handle_hook(db_path: &PathBuf) {
                 eprintln!("leafhill-hook: failed to log Stop: {}", e);
             }
         }
+        "PreCompact" => {
+            let transcript_path = hook.get("transcript_path")
+                .and_then(|v| v.as_str());
+            let transcript_path = match transcript_path {
+                Some(p) => p,
+                None => {
+                    eprintln!("leafhill-hook: PreCompact: no transcript_path");
+                    return;
+                }
+            };
+
+            let file = match std::fs::File::open(transcript_path) {
+                Ok(f) => f,
+                Err(e) => {
+                    eprintln!("leafhill-hook: PreCompact: cannot open transcript: {}", e);
+                    return;
+                }
+            };
+
+            let formatted_sid = derive_session_id(session_id, cwd);
+            let project = project_from_cwd(cwd).to_string();
+            let mut messages: Vec<PreCompactMessage> = Vec::new();
+
+            let reader = io::BufReader::new(file);
+            for line in reader.lines() {
+                let line = match line {
+                    Ok(l) => l,
+                    Err(e) => {
+                        eprintln!("leafhill-hook: PreCompact: read error: {}", e);
+                        continue;
+                    }
+                };
+                if line.trim().is_empty() { continue; }
+
+                let event_obj: Value = match serde_json::from_str(&line) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        eprintln!("leafhill-hook: PreCompact: malformed JSONL line: {}", e);
+                        continue;
+                    }
+                };
+
+                let event_type = event_obj.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                if event_type != "user" && event_type != "assistant" {
+                    continue;
+                }
+
+                let message = match event_obj.get("message") {
+                    Some(m) => m,
+                    None => continue,
+                };
+
+                let role = message.get("role")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(event_type)
+                    .to_string();
+
+                let content = extract_content(message);
+                if content.is_empty() { continue; }
+
+                let model = message.get("model")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+
+                let usage = message.get("usage");
+                let input_tokens = usage
+                    .and_then(|u| u.get("input_tokens"))
+                    .and_then(|v| v.as_i64());
+                let output_tokens = usage
+                    .and_then(|u| u.get("output_tokens"))
+                    .and_then(|v| v.as_i64());
+                let cache_creation_tokens = usage
+                    .and_then(|u| u.get("cache_creation_input_tokens"))
+                    .and_then(|v| v.as_i64());
+                let cache_read_tokens = usage
+                    .and_then(|u| u.get("cache_read_input_tokens"))
+                    .and_then(|v| v.as_i64());
+
+                let message_timestamp = event_obj.get("timestamp")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+
+                messages.push(PreCompactMessage {
+                    session_id: formatted_sid.clone(),
+                    role,
+                    content,
+                    project: project.clone(),
+                    model,
+                    input_tokens,
+                    output_tokens,
+                    cache_creation_tokens,
+                    cache_read_tokens,
+                    message_timestamp,
+                });
+            }
+
+            if messages.is_empty() { return; }
+
+            let db = match Database::open(db_path) {
+                Ok(db) => db,
+                Err(e) => { eprintln!("leafhill-hook: db error: {}", e); return; }
+            };
+            match db.store_pre_compact_batch(&messages) {
+                Ok(count) => {
+                    eprintln!("leafhill-hook: PreCompact: stored {} messages", count);
+                }
+                Err(e) => {
+                    eprintln!("leafhill-hook: PreCompact: db write failed: {}", e);
+                }
+            }
+        }
         _ => {
             eprintln!("leafhill-hook: ignoring event: {}", event);
         }
     }
+}
+
+/// Extract text content from a transcript message.
+/// For string content: return as-is.
+/// For content arrays: extract text and thinking blocks, skip tool_use/tool_result.
+fn extract_content(message: &Value) -> String {
+    let content = match message.get("content") {
+        Some(c) => c,
+        None => return String::new(),
+    };
+
+    // String content (typical for user messages)
+    if let Some(s) = content.as_str() {
+        return s.to_string();
+    }
+
+    // Array content (assistant messages, tool results)
+    if let Some(arr) = content.as_array() {
+        let mut parts: Vec<String> = Vec::new();
+        for block in arr {
+            let block_type = block.get("type").and_then(|v| v.as_str()).unwrap_or("");
+            match block_type {
+                "text" => {
+                    if let Some(text) = block.get("text").and_then(|v| v.as_str()) {
+                        parts.push(text.to_string());
+                    }
+                }
+                "thinking" => {
+                    if let Some(thinking) = block.get("thinking").and_then(|v| v.as_str()) {
+                        parts.push(format!("[thinking] {}", thinking));
+                    }
+                }
+                "tool_result" => {
+                    // User tool_result: serialize as JSON for completeness
+                    if let Some(result_content) = block.get("content") {
+                        if let Some(s) = result_content.as_str() {
+                            parts.push(s.to_string());
+                        } else {
+                            parts.push(result_content.to_string());
+                        }
+                    }
+                }
+                // Skip tool_use blocks
+                _ => {}
+            }
+        }
+        return parts.join("\n");
+    }
+
+    // Fallback: serialize whatever it is
+    content.to_string()
 }

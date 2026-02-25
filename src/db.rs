@@ -22,6 +22,12 @@ pub struct ConversationEntry {
     pub project: Option<String>,
     pub entry_type: Option<String>,
     pub raw_id: Option<i64>,
+    pub model: Option<String>,
+    pub input_tokens: Option<i64>,
+    pub output_tokens: Option<i64>,
+    pub cache_creation_tokens: Option<i64>,
+    pub cache_read_tokens: Option<i64>,
+    pub message_timestamp: Option<String>,
     pub created_at: String,
 }
 
@@ -53,6 +59,19 @@ pub struct Link {
     pub target_id: i64,
     pub relation: Option<String>,
     pub created_at: String,
+}
+
+pub struct PreCompactMessage {
+    pub session_id: String,
+    pub role: String,
+    pub content: String,
+    pub project: String,
+    pub model: Option<String>,
+    pub input_tokens: Option<i64>,
+    pub output_tokens: Option<i64>,
+    pub cache_creation_tokens: Option<i64>,
+    pub cache_read_tokens: Option<i64>,
+    pub message_timestamp: Option<String>,
 }
 
 pub struct Database {
@@ -188,6 +207,13 @@ impl Database {
         )?;
         self.conn.execute("ALTER TABLE conversations ADD COLUMN entry_type TEXT", []).ok();
         self.conn.execute("ALTER TABLE conversations ADD COLUMN raw_id INTEGER", []).ok();
+        // v1.4: metadata columns for PreCompact transcript storage
+        self.conn.execute("ALTER TABLE conversations ADD COLUMN model TEXT", []).ok();
+        self.conn.execute("ALTER TABLE conversations ADD COLUMN input_tokens INTEGER", []).ok();
+        self.conn.execute("ALTER TABLE conversations ADD COLUMN output_tokens INTEGER", []).ok();
+        self.conn.execute("ALTER TABLE conversations ADD COLUMN cache_creation_tokens INTEGER", []).ok();
+        self.conn.execute("ALTER TABLE conversations ADD COLUMN cache_read_tokens INTEGER", []).ok();
+        self.conn.execute("ALTER TABLE conversations ADD COLUMN message_timestamp TEXT", []).ok();
         Ok(())
     }
 
@@ -313,7 +339,7 @@ impl Database {
 
         let id = self.conn.last_insert_rowid();
         let mut stmt = self.conn.prepare(
-            "SELECT id, session_id, role, content, project, entry_type, raw_id, created_at
+            "SELECT id, session_id, role, content, project, entry_type, raw_id, model, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, message_timestamp, created_at
              FROM conversations WHERE id = ?1"
         )?;
 
@@ -328,7 +354,9 @@ impl Database {
         limit: usize,
     ) -> rusqlite::Result<Vec<ConversationEntry>> {
         let mut sql = String::from(
-            "SELECT c.id, c.session_id, c.role, c.content, c.project, c.entry_type, c.raw_id, c.created_at
+            "SELECT c.id, c.session_id, c.role, c.content, c.project, c.entry_type, c.raw_id, \
+             c.model, c.input_tokens, c.output_tokens, c.cache_creation_tokens, c.cache_read_tokens, \
+             c.message_timestamp, c.created_at
              FROM conversations_fts f
              JOIN conversations c ON c.id = f.rowid
              WHERE conversations_fts MATCH ?1"
@@ -367,7 +395,7 @@ impl Database {
         limit: usize,
     ) -> rusqlite::Result<Vec<ConversationEntry>> {
         let mut sql = String::from(
-            "SELECT id, session_id, role, content, project, entry_type, raw_id, created_at
+            "SELECT id, session_id, role, content, project, entry_type, raw_id, model, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, message_timestamp, created_at
              FROM conversations"
         );
         let mut p: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
@@ -424,7 +452,13 @@ impl Database {
             project: row.get(4)?,
             entry_type: row.get(5)?,
             raw_id: row.get(6)?,
-            created_at: row.get(7)?,
+            model: row.get(7)?,
+            input_tokens: row.get(8)?,
+            output_tokens: row.get(9)?,
+            cache_creation_tokens: row.get(10)?,
+            cache_read_tokens: row.get(11)?,
+            message_timestamp: row.get(12)?,
+            created_at: row.get(13)?,
         })
     }
 
@@ -466,7 +500,7 @@ impl Database {
         limit: usize,
     ) -> rusqlite::Result<Vec<ConversationEntry>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, session_id, role, content, project, entry_type, raw_id, created_at
+            "SELECT id, session_id, role, content, project, entry_type, raw_id, model, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, message_timestamp, created_at
              FROM conversations
              WHERE session_id = ?1 AND entry_type = 'summary'
              ORDER BY created_at ASC
@@ -848,7 +882,7 @@ impl Database {
         older_than_days: Option<i64>,
     ) -> rusqlite::Result<Vec<ConversationEntry>> {
         let mut sql = String::from(
-            "SELECT id, session_id, role, content, project, entry_type, raw_id, created_at FROM conversations"
+            "SELECT id, session_id, role, content, project, entry_type, raw_id, model, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, message_timestamp, created_at FROM conversations"
         );
         let mut p: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
         let mut idx = 1;
@@ -1073,9 +1107,14 @@ impl Database {
 
     pub fn restore_conversation(&self, entry: &ConversationEntry) -> rusqlite::Result<bool> {
         let affected = self.conn.execute(
-            "INSERT OR IGNORE INTO conversations (id, session_id, role, content, project, entry_type, raw_id, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            params![entry.id, entry.session_id, entry.role, entry.content, entry.project, entry.entry_type, entry.raw_id, entry.created_at],
+            "INSERT OR IGNORE INTO conversations (id, session_id, role, content, project, entry_type, raw_id, \
+             model, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, \
+             message_timestamp, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+            params![entry.id, entry.session_id, entry.role, entry.content, entry.project,
+                    entry.entry_type, entry.raw_id, entry.model, entry.input_tokens,
+                    entry.output_tokens, entry.cache_creation_tokens, entry.cache_read_tokens,
+                    entry.message_timestamp, entry.created_at],
         )?;
         Ok(affected > 0)
     }
@@ -1106,6 +1145,35 @@ impl Database {
         Ok(affected > 0)
     }
 
+    // ── PreCompact batch insert ─────────────────────────────────────────
+
+    pub fn store_pre_compact_batch(
+        &self,
+        messages: &[PreCompactMessage],
+    ) -> rusqlite::Result<usize> {
+        let tx = self.conn.unchecked_transaction()?;
+        let mut count = 0usize;
+        {
+            let mut stmt = tx.prepare_cached(
+                "INSERT INTO conversations (session_id, role, content, project, entry_type, \
+                 model, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, \
+                 message_timestamp) \
+                 VALUES (?1, ?2, ?3, ?4, 'pre_compact', ?5, ?6, ?7, ?8, ?9, ?10)"
+            )?;
+            for msg in messages {
+                stmt.execute(params![
+                    msg.session_id, msg.role, msg.content, msg.project,
+                    msg.model, msg.input_tokens, msg.output_tokens,
+                    msg.cache_creation_tokens, msg.cache_read_tokens,
+                    msg.message_timestamp,
+                ])?;
+                count += 1;
+            }
+        }
+        tx.commit()?;
+        Ok(count)
+    }
+
     // ── Export (full table reads) ────────────────────────────────────────
 
     pub fn export_all_memories(&self) -> rusqlite::Result<Vec<Memory>> {
@@ -1119,7 +1187,7 @@ impl Database {
 
     pub fn export_all_conversations(&self) -> rusqlite::Result<Vec<ConversationEntry>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, session_id, role, content, project, entry_type, raw_id, created_at
+            "SELECT id, session_id, role, content, project, entry_type, raw_id, model, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, message_timestamp, created_at
              FROM conversations ORDER BY id ASC"
         )?;
         let rows = stmt.query_map([], Self::row_to_conversation)?;

@@ -338,9 +338,9 @@ pub enum ArchiveCommands {
         /// Filter by category (memories only)
         #[arg(long, short)]
         category: Option<String>,
-        /// Keep source data in database (default: remove after archive)
+        /// Remove source data from database after archiving (default: keep)
         #[arg(long)]
-        keep: bool,
+        purge: bool,
         /// Overwrite existing output file
         #[arg(long)]
         force: bool,
@@ -599,7 +599,7 @@ pub fn run_cli(command: Commands, db_path: &PathBuf) {
         Commands::Archive { command: archive_cmd } => {
             let db_path_str = db_path.to_string_lossy().to_string();
             match archive_cmd {
-                ArchiveCommands::Create { output, entity_type, older_than, project, category, keep, force } => {
+                ArchiveCommands::Create { output, entity_type, older_than, project, category, purge, force } => {
                     let valid_types = ["memories", "conversations", "tasks", "all"];
                     if !valid_types.contains(&entity_type.as_str()) {
                         eprintln!("Invalid entity type '{}'. Must be one of: {}", entity_type, valid_types.join(", "));
@@ -608,7 +608,7 @@ pub fn run_cli(command: Commands, db_path: &PathBuf) {
                     let output_path = std::path::Path::new(&output);
                     if let Err(e) = crate::archive::run_archive_create(
                         &db, &db_path_str, output_path, &entity_type,
-                        older_than, project.as_deref(), category.as_deref(), keep, force,
+                        older_than, project.as_deref(), category.as_deref(), !purge, force,
                     ) {
                         eprintln!("{}", e);
                         std::process::exit(1);
