@@ -739,6 +739,27 @@ impl Database {
         Ok(affected > 0)
     }
 
+    // ── Backup ────────────────────────────────────────────────────────────
+
+    pub fn backup_to(&self, path: &str) -> rusqlite::Result<()> {
+        self.conn.execute("VACUUM INTO ?1", params![path])?;
+        Ok(())
+    }
+
+    pub fn table_counts(&self) -> rusqlite::Result<Vec<(String, i64)>> {
+        let tables = ["memories", "conversations", "tasks", "task_deps", "links"];
+        let mut counts = Vec::new();
+        for table in &tables {
+            let count: i64 = self.conn.query_row(
+                &format!("SELECT COUNT(*) FROM {}", table),
+                [],
+                |row| row.get(0),
+            )?;
+            counts.push((table.to_string(), count));
+        }
+        Ok(counts)
+    }
+
     pub fn search_linked(
         &self,
         entity_type: &str,
@@ -778,6 +799,356 @@ impl Database {
 
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map(rusqlite::params_from_iter(p.iter()), Self::row_to_link)?;
+        rows.collect()
+    }
+
+    // ── Archive queries ──────────────────────────────────────────────────
+
+    pub fn query_memories_for_archive(
+        &self,
+        category: Option<&str>,
+        older_than_days: Option<i64>,
+    ) -> rusqlite::Result<Vec<Memory>> {
+        let mut sql = String::from(
+            "SELECT id, category, key, value, tags, created_at, updated_at FROM memories"
+        );
+        let mut p: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+        let mut idx = 1;
+        let mut has_where = false;
+
+        if let Some(cat) = category {
+            sql.push_str(&format!(" WHERE category = ?{}", idx));
+            p.push(Box::new(cat.to_string()));
+            idx += 1;
+            has_where = true;
+        }
+
+        if let Some(days) = older_than_days {
+            let clause = format!(
+                " {} updated_at < datetime('now', ?{})",
+                if has_where { "AND" } else { "WHERE" },
+                idx
+            );
+            sql.push_str(&clause);
+            p.push(Box::new(format!("-{} days", days)));
+            idx += 1;
+        }
+
+        sql.push_str(&format!(" ORDER BY id ASC LIMIT ?{}", idx));
+        p.push(Box::new(100_000i64));
+
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(p.iter()), Self::row_to_memory)?;
+        rows.collect()
+    }
+
+    pub fn query_conversations_for_archive(
+        &self,
+        project: Option<&str>,
+        older_than_days: Option<i64>,
+    ) -> rusqlite::Result<Vec<ConversationEntry>> {
+        let mut sql = String::from(
+            "SELECT id, session_id, role, content, project, entry_type, raw_id, created_at FROM conversations"
+        );
+        let mut p: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+        let mut idx = 1;
+        let mut has_where = false;
+
+        if let Some(proj) = project {
+            sql.push_str(&format!(" WHERE project = ?{}", idx));
+            p.push(Box::new(proj.to_string()));
+            idx += 1;
+            has_where = true;
+        }
+
+        if let Some(days) = older_than_days {
+            let clause = format!(
+                " {} created_at < datetime('now', ?{})",
+                if has_where { "AND" } else { "WHERE" },
+                idx
+            );
+            sql.push_str(&clause);
+            p.push(Box::new(format!("-{} days", days)));
+            idx += 1;
+        }
+
+        sql.push_str(&format!(" ORDER BY id ASC LIMIT ?{}", idx));
+        p.push(Box::new(100_000i64));
+
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(p.iter()), Self::row_to_conversation)?;
+        rows.collect()
+    }
+
+    pub fn query_tasks_for_archive(
+        &self,
+        project: Option<&str>,
+        older_than_days: Option<i64>,
+    ) -> rusqlite::Result<Vec<Task>> {
+        let mut sql = String::from(
+            "SELECT id, project, subject, description, status, priority, task_type, parent_id, due_date, created_by, assignee, owner, session_id, created_at, updated_at FROM tasks"
+        );
+        let mut p: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+        let mut idx = 1;
+        let mut has_where = false;
+
+        if let Some(proj) = project {
+            sql.push_str(&format!(" WHERE project = ?{}", idx));
+            p.push(Box::new(proj.to_string()));
+            idx += 1;
+            has_where = true;
+        }
+
+        if let Some(days) = older_than_days {
+            let clause = format!(
+                " {} updated_at < datetime('now', ?{})",
+                if has_where { "AND" } else { "WHERE" },
+                idx
+            );
+            sql.push_str(&clause);
+            p.push(Box::new(format!("-{} days", days)));
+            idx += 1;
+        }
+
+        sql.push_str(&format!(" ORDER BY id ASC LIMIT ?{}", idx));
+        p.push(Box::new(100_000i64));
+
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(p.iter()), Self::row_to_task)?;
+        rows.collect()
+    }
+
+    pub fn get_subtask_ids_recursive(&self, task_ids: &[i64]) -> rusqlite::Result<Vec<i64>> {
+        if task_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut all_ids: Vec<i64> = Vec::new();
+        let mut current_parents = task_ids.to_vec();
+
+        loop {
+            if current_parents.is_empty() {
+                break;
+            }
+            let placeholders: String = current_parents.iter().enumerate()
+                .map(|(i, _)| format!("?{}", i + 1))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let sql = format!(
+                "SELECT id FROM tasks WHERE parent_id IN ({})",
+                placeholders
+            );
+            let mut stmt = self.conn.prepare(&sql)?;
+            let params: Vec<Box<dyn rusqlite::types::ToSql>> = current_parents.iter()
+                .map(|id| Box::new(*id) as Box<dyn rusqlite::types::ToSql>)
+                .collect();
+            let children: Vec<i64> = stmt.query_map(
+                rusqlite::params_from_iter(params.iter()),
+                |row| row.get(0),
+            )?.collect::<rusqlite::Result<_>>()?;
+
+            if children.is_empty() {
+                break;
+            }
+            all_ids.extend(&children);
+            current_parents = children;
+        }
+
+        Ok(all_ids)
+    }
+
+    pub fn get_task_deps_for_task_ids(&self, task_ids: &[i64]) -> rusqlite::Result<Vec<(i64, i64)>> {
+        if task_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let placeholders: String = task_ids.iter().enumerate()
+            .map(|(i, _)| format!("?{}", i + 1))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT blocker_id, blocked_id FROM task_deps WHERE blocker_id IN ({ph}) OR blocked_id IN ({ph})",
+            ph = placeholders
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let params: Vec<Box<dyn rusqlite::types::ToSql>> = task_ids.iter()
+            .map(|id| Box::new(*id) as Box<dyn rusqlite::types::ToSql>)
+            .collect();
+        let rows = stmt.query_map(
+            rusqlite::params_from_iter(params.iter()),
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        rows.collect()
+    }
+
+    pub fn get_links_for_entity_ids(
+        &self,
+        entity_type: &str,
+        entity_ids: &[i64],
+    ) -> rusqlite::Result<Vec<Link>> {
+        if entity_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let placeholders: String = entity_ids.iter().enumerate()
+            .map(|(i, _)| format!("?{}", i + 2))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT id, source_type, source_id, target_type, target_id, relation, created_at
+             FROM links
+             WHERE (source_type = ?1 AND source_id IN ({ph}))
+                OR (target_type = ?1 AND target_id IN ({ph}))",
+            ph = placeholders
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(entity_type.to_string())];
+        for id in entity_ids {
+            params.push(Box::new(*id));
+        }
+        let rows = stmt.query_map(rusqlite::params_from_iter(params.iter()), Self::row_to_link)?;
+        rows.collect()
+    }
+
+    // ── Archive deletes ──────────────────────────────────────────────────
+
+    pub fn delete_links_by_ids(&self, ids: &[i64]) -> rusqlite::Result<usize> {
+        self.delete_by_ids("links", ids)
+    }
+
+    pub fn delete_task_deps_for_task_ids(&self, task_ids: &[i64]) -> rusqlite::Result<usize> {
+        if task_ids.is_empty() {
+            return Ok(0);
+        }
+        let placeholders: String = task_ids.iter().enumerate()
+            .map(|(i, _)| format!("?{}", i + 1))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "DELETE FROM task_deps WHERE blocker_id IN ({ph}) OR blocked_id IN ({ph})",
+            ph = placeholders
+        );
+        let params: Vec<Box<dyn rusqlite::types::ToSql>> = task_ids.iter()
+            .map(|id| Box::new(*id) as Box<dyn rusqlite::types::ToSql>)
+            .collect();
+        self.conn.execute(&sql, rusqlite::params_from_iter(params.iter()))
+    }
+
+    pub fn delete_memories_by_ids(&self, ids: &[i64]) -> rusqlite::Result<usize> {
+        self.delete_by_ids("memories", ids)
+    }
+
+    pub fn delete_conversations_by_ids(&self, ids: &[i64]) -> rusqlite::Result<usize> {
+        self.delete_by_ids("conversations", ids)
+    }
+
+    pub fn delete_tasks_by_ids(&self, ids: &[i64]) -> rusqlite::Result<usize> {
+        self.delete_by_ids("tasks", ids)
+    }
+
+    fn delete_by_ids(&self, table: &str, ids: &[i64]) -> rusqlite::Result<usize> {
+        if ids.is_empty() {
+            return Ok(0);
+        }
+        let placeholders: String = ids.iter().enumerate()
+            .map(|(i, _)| format!("?{}", i + 1))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!("DELETE FROM {} WHERE id IN ({})", table, placeholders);
+        let params: Vec<Box<dyn rusqlite::types::ToSql>> = ids.iter()
+            .map(|id| Box::new(*id) as Box<dyn rusqlite::types::ToSql>)
+            .collect();
+        self.conn.execute(&sql, rusqlite::params_from_iter(params.iter()))
+    }
+
+    // ── Archive restore ──────────────────────────────────────────────────
+
+    pub fn restore_memory(&self, mem: &Memory) -> rusqlite::Result<bool> {
+        let tags_json = mem.tags.as_ref().map(|t| serde_json::to_string(t).unwrap_or_default());
+        let affected = self.conn.execute(
+            "INSERT OR IGNORE INTO memories (id, category, key, value, tags, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![mem.id, mem.category, mem.key, mem.value, tags_json, mem.created_at, mem.updated_at],
+        )?;
+        Ok(affected > 0)
+    }
+
+    pub fn restore_conversation(&self, entry: &ConversationEntry) -> rusqlite::Result<bool> {
+        let affected = self.conn.execute(
+            "INSERT OR IGNORE INTO conversations (id, session_id, role, content, project, entry_type, raw_id, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![entry.id, entry.session_id, entry.role, entry.content, entry.project, entry.entry_type, entry.raw_id, entry.created_at],
+        )?;
+        Ok(affected > 0)
+    }
+
+    pub fn restore_task(&self, task: &Task) -> rusqlite::Result<bool> {
+        let affected = self.conn.execute(
+            "INSERT OR IGNORE INTO tasks (id, project, subject, description, status, priority, task_type, parent_id, due_date, created_by, assignee, owner, session_id, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+            params![task.id, task.project, task.subject, task.description, task.status, task.priority, task.task_type, task.parent_id, task.due_date, task.created_by, task.assignee, task.owner, task.session_id, task.created_at, task.updated_at],
+        )?;
+        Ok(affected > 0)
+    }
+
+    pub fn restore_task_dep(&self, blocker_id: i64, blocked_id: i64) -> rusqlite::Result<bool> {
+        let affected = self.conn.execute(
+            "INSERT OR IGNORE INTO task_deps (blocker_id, blocked_id) VALUES (?1, ?2)",
+            params![blocker_id, blocked_id],
+        )?;
+        Ok(affected > 0)
+    }
+
+    pub fn restore_link(&self, link: &Link) -> rusqlite::Result<bool> {
+        let affected = self.conn.execute(
+            "INSERT OR IGNORE INTO links (id, source_type, source_id, target_type, target_id, relation, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![link.id, link.source_type, link.source_id, link.target_type, link.target_id, link.relation, link.created_at],
+        )?;
+        Ok(affected > 0)
+    }
+
+    // ── Export (full table reads) ────────────────────────────────────────
+
+    pub fn export_all_memories(&self) -> rusqlite::Result<Vec<Memory>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, category, key, value, tags, created_at, updated_at
+             FROM memories ORDER BY id ASC"
+        )?;
+        let rows = stmt.query_map([], Self::row_to_memory)?;
+        rows.collect()
+    }
+
+    pub fn export_all_conversations(&self) -> rusqlite::Result<Vec<ConversationEntry>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, session_id, role, content, project, entry_type, raw_id, created_at
+             FROM conversations ORDER BY id ASC"
+        )?;
+        let rows = stmt.query_map([], Self::row_to_conversation)?;
+        rows.collect()
+    }
+
+    pub fn export_all_tasks(&self) -> rusqlite::Result<Vec<Task>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, project, subject, description, status, priority, task_type, parent_id, due_date, created_by, assignee, owner, session_id, created_at, updated_at
+             FROM tasks ORDER BY CASE WHEN parent_id IS NULL THEN 0 ELSE 1 END, id ASC"
+        )?;
+        let rows = stmt.query_map([], Self::row_to_task)?;
+        rows.collect()
+    }
+
+    pub fn export_all_task_deps(&self) -> rusqlite::Result<Vec<(i64, i64)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT blocker_id, blocked_id FROM task_deps ORDER BY blocker_id, blocked_id"
+        )?;
+        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        rows.collect()
+    }
+
+    pub fn export_all_links(&self) -> rusqlite::Result<Vec<Link>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, source_type, source_id, target_type, target_id, relation, created_at
+             FROM links ORDER BY id ASC"
+        )?;
+        let rows = stmt.query_map([], Self::row_to_link)?;
         rows.collect()
     }
 }

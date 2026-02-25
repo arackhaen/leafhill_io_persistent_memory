@@ -79,6 +79,33 @@ pub enum Commands {
         #[command(subcommand)]
         command: LogCommands,
     },
+
+    /// Create a backup of the database
+    Backup {
+        /// Output file path
+        output: String,
+        /// Overwrite existing file
+        #[arg(long)]
+        force: bool,
+    },
+
+    /// Archive operations (create and restore)
+    Archive {
+        #[command(subcommand)]
+        command: ArchiveCommands,
+    },
+
+    /// Export data to an external RDBMS (PostgreSQL, MySQL)
+    Export {
+        /// Database connection URL (e.g., postgres://user:pass@host/db)
+        database_url: String,
+        /// Comma-separated list of tables to export (default: all)
+        #[arg(long)]
+        tables: Option<String>,
+        /// Number of rows per batch (default: 500)
+        #[arg(long, default_value = "500")]
+        batch_size: usize,
+    },
 }
 
 #[derive(Subcommand)]
@@ -290,6 +317,39 @@ pub enum LinkCommands {
     Delete {
         /// Link ID
         link_id: i64,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum ArchiveCommands {
+    /// Archive entities to a JSON file
+    Create {
+        /// Output file path
+        output: String,
+        /// Entity type to archive: memories, conversations, tasks, all
+        #[arg(long, name = "type", default_value = "all")]
+        entity_type: String,
+        /// Only archive entries older than N days
+        #[arg(long)]
+        older_than: Option<i64>,
+        /// Filter by project (conversations, tasks)
+        #[arg(long, short)]
+        project: Option<String>,
+        /// Filter by category (memories only)
+        #[arg(long, short)]
+        category: Option<String>,
+        /// Keep source data in database (default: remove after archive)
+        #[arg(long)]
+        keep: bool,
+        /// Overwrite existing output file
+        #[arg(long)]
+        force: bool,
+    },
+
+    /// Restore entities from an archive JSON file
+    Restore {
+        /// Input archive file path
+        input: String,
     },
 }
 
@@ -527,6 +587,61 @@ pub fn run_cli(command: Commands, db_path: &PathBuf) {
                 }
             }
         },
+
+        Commands::Backup { output, force } => {
+            let output_path = std::path::Path::new(&output);
+            if let Err(e) = crate::backup::run_backup(&db, output_path, force) {
+                eprintln!("{}", e);
+                std::process::exit(1);
+            }
+        }
+
+        Commands::Archive { command: archive_cmd } => {
+            let db_path_str = db_path.to_string_lossy().to_string();
+            match archive_cmd {
+                ArchiveCommands::Create { output, entity_type, older_than, project, category, keep, force } => {
+                    let valid_types = ["memories", "conversations", "tasks", "all"];
+                    if !valid_types.contains(&entity_type.as_str()) {
+                        eprintln!("Invalid entity type '{}'. Must be one of: {}", entity_type, valid_types.join(", "));
+                        std::process::exit(1);
+                    }
+                    let output_path = std::path::Path::new(&output);
+                    if let Err(e) = crate::archive::run_archive_create(
+                        &db, &db_path_str, output_path, &entity_type,
+                        older_than, project.as_deref(), category.as_deref(), keep, force,
+                    ) {
+                        eprintln!("{}", e);
+                        std::process::exit(1);
+                    }
+                }
+                ArchiveCommands::Restore { input } => {
+                    let input_path = std::path::Path::new(&input);
+                    if let Err(e) = crate::archive::run_archive_restore(&db, input_path) {
+                        eprintln!("{}", e);
+                        std::process::exit(1);
+                    }
+                }
+            }
+        }
+
+        Commands::Export { database_url, tables, batch_size } => {
+            let table_list = crate::rdbms_export::parse_tables(tables.as_deref());
+            let valid = ["memories", "conversations", "tasks", "task_deps", "links"];
+            for t in &table_list {
+                if !valid.contains(&t.as_str()) {
+                    eprintln!("Invalid table '{}'. Must be one of: {}", t, valid.join(", "));
+                    std::process::exit(1);
+                }
+            }
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            if let Err(e) = rt.block_on(crate::rdbms_export::run_export(&db, &database_url, &table_list, batch_size)) {
+                eprintln!("{}", e);
+                std::process::exit(1);
+            }
+        }
 
         Commands::Log { command: log_cmd } => match log_cmd {
             LogCommands::Search { query, session, entry_type, limit } => {

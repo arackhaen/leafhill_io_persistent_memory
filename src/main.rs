@@ -1,7 +1,10 @@
+mod archive;
+mod backup;
 mod cli;
 mod db;
 mod hook;
 mod mcp;
+mod rdbms_export;
 
 use clap::Parser;
 use cli::{Cli, Commands};
