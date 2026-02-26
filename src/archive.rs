@@ -71,6 +71,7 @@ pub fn run_archive_create(
     category: Option<&str>,
     keep: bool,
     force: bool,
+    limit: Option<usize>,
 ) -> Result<(), String> {
     if output.exists() && !force {
         return Err(format!(
@@ -89,7 +90,7 @@ pub fn run_archive_create(
 
     // Collect entities
     if archive_memories {
-        data.memories = db.query_memories_for_archive(category, older_than_days)
+        data.memories = db.query_memories_for_archive(category, older_than_days, limit)
             .map_err(|e| format!("Failed to query memories: {}", e))?;
         if !data.memories.is_empty() {
             entity_types.push("memories".to_string());
@@ -105,7 +106,7 @@ pub fn run_archive_create(
     }
 
     if archive_conversations {
-        data.conversations = db.query_conversations_for_archive(project, older_than_days)
+        data.conversations = db.query_conversations_for_archive(project, older_than_days, limit)
             .map_err(|e| format!("Failed to query conversations: {}", e))?;
         if !data.conversations.is_empty() {
             entity_types.push("conversations".to_string());
@@ -121,7 +122,7 @@ pub fn run_archive_create(
     }
 
     if archive_tasks {
-        let mut tasks = db.query_tasks_for_archive(project, older_than_days)
+        let mut tasks = db.query_tasks_for_archive(project, older_than_days, limit)
             .map_err(|e| format!("Failed to query tasks: {}", e))?;
 
         if !tasks.is_empty() {
@@ -169,6 +170,13 @@ pub fn run_archive_create(
     if total == 0 {
         println!("No entities match the given filters. No archive file created.");
         return Ok(());
+    }
+
+    if total >= 100_000 {
+        eprintln!(
+            "Warning: archive contains {} entities. Consider using --limit to reduce size.",
+            total
+        );
     }
 
     let envelope = ArchiveEnvelope {

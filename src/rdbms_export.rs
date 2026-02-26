@@ -182,7 +182,6 @@ pub async fn run_export(
     db: &Database,
     url: &str,
     tables: &[String],
-    _batch_size: usize,
 ) -> Result<(), String> {
     if !url.starts_with("postgres://") && !url.starts_with("postgresql://") {
         return Err(format!(

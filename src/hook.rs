@@ -217,7 +217,7 @@ pub fn handle_hook(db_path: &PathBuf) {
 /// Extract text content from a transcript message.
 /// For string content: return as-is.
 /// For content arrays: extract text and thinking blocks, skip tool_use/tool_result.
-fn extract_content(message: &Value) -> String {
+pub(crate) fn extract_content(message: &Value) -> String {
     let content = match message.get("content") {
         Some(c) => c,
         None => return String::new(),
@@ -263,4 +263,95 @@ fn extract_content(message: &Value) -> String {
 
     // Fallback: serialize whatever it is
     content.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    // ── extract_content tests ────────────────────────────────────────
+
+    #[test]
+    fn test_extract_content_string() {
+        let msg = json!({"content": "hello world"});
+        assert_eq!(extract_content(&msg), "hello world");
+    }
+
+    #[test]
+    fn test_extract_content_text_and_thinking() {
+        let msg = json!({
+            "content": [
+                {"type": "text", "text": "response text"},
+                {"type": "thinking", "thinking": "internal thought"},
+                {"type": "tool_use", "name": "bash", "input": {}}
+            ]
+        });
+        let result = extract_content(&msg);
+        assert!(result.contains("response text"));
+        assert!(result.contains("[thinking] internal thought"));
+        assert!(!result.contains("bash")); // tool_use skipped
+    }
+
+    #[test]
+    fn test_extract_content_tool_result() {
+        let msg = json!({
+            "content": [
+                {"type": "tool_result", "content": "tool output text"}
+            ]
+        });
+        assert_eq!(extract_content(&msg), "tool output text");
+    }
+
+    #[test]
+    fn test_extract_content_tool_result_object() {
+        let msg = json!({
+            "content": [
+                {"type": "tool_result", "content": {"key": "value"}}
+            ]
+        });
+        let result = extract_content(&msg);
+        assert!(result.contains("key"));
+        assert!(result.contains("value"));
+    }
+
+    #[test]
+    fn test_extract_content_missing() {
+        let msg = json!({"role": "user"});
+        assert_eq!(extract_content(&msg), "");
+    }
+
+    #[test]
+    fn test_extract_content_empty_array() {
+        let msg = json!({"content": []});
+        assert_eq!(extract_content(&msg), "");
+    }
+
+    // ── derive_session_id tests ──────────────────────────────────────
+
+    #[test]
+    fn test_derive_session_id_format() {
+        let result = derive_session_id("abc123", "/home/user/myproject");
+        assert_eq!(result, "abc123-myproject");
+    }
+
+    // ── project_from_cwd tests ───────────────────────────────────────
+
+    #[test]
+    fn test_project_from_cwd_normal() {
+        assert_eq!(project_from_cwd("/home/user/myproject"), "myproject");
+    }
+
+    #[test]
+    fn test_project_from_cwd_trailing_slash() {
+        // rsplit('/') on trailing slash gives empty first, then the dir name
+        let result = project_from_cwd("/home/user/myproject/");
+        // With trailing slash, rsplit('/').next() is "", which maps to "unknown0"
+        assert_eq!(result, "unknown0");
+    }
+
+    #[test]
+    fn test_project_from_cwd_empty() {
+        assert_eq!(project_from_cwd(""), "unknown0");
+    }
 }

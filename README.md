@@ -145,8 +145,8 @@ leafhill-persistent-memory log search "search term"
 
 ```bash
 # Memory operations
-leafhill-persistent-memory memory list
-leafhill-persistent-memory memory search "query"
+leafhill-persistent-memory list
+leafhill-persistent-memory search "query"
 
 # Task operations
 leafhill-persistent-memory task list --project myproject
@@ -156,7 +156,7 @@ leafhill-persistent-memory task get 42
 leafhill-persistent-memory log search "query"
 
 # Link operations
-leafhill-persistent-memory link list --type task --id 42
+leafhill-persistent-memory link list task 42
 ```
 
 ## Database

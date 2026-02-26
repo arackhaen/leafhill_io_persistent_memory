@@ -1,5 +1,5 @@
 use clap::{Parser, Subcommand};
-use crate::db::Database;
+use crate::db::{Database, TaskStatus, TaskPriority, TaskType};
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -95,16 +95,13 @@ pub enum Commands {
         command: ArchiveCommands,
     },
 
-    /// Export data to an external RDBMS (PostgreSQL, MySQL)
+    /// Export data to PostgreSQL
     Export {
         /// Database connection URL (e.g., postgres://user:pass@host/db)
         database_url: String,
         /// Comma-separated list of tables to export (default: all)
         #[arg(long)]
         tables: Option<String>,
-        /// Number of rows per batch (default: 500)
-        #[arg(long, default_value = "500")]
-        batch_size: usize,
     },
 }
 
@@ -338,6 +335,9 @@ pub enum ArchiveCommands {
         /// Filter by category (memories only)
         #[arg(long, short)]
         category: Option<String>,
+        /// Maximum number of entities per type to archive (default: unlimited)
+        #[arg(long)]
+        limit: Option<usize>,
         /// Remove source data from database after archiving (default: keep)
         #[arg(long)]
         purge: bool,
@@ -440,6 +440,12 @@ pub fn run_cli(command: Commands, db_path: &PathBuf) {
 
         Commands::Task { command: task_cmd } => match task_cmd {
             TaskCommands::Create { project, subject, description, priority, task_type, assignee, owner, due, parent } => {
+                if let Some(ref p) = priority {
+                    if let Err(e) = p.parse::<TaskPriority>() { eprintln!("{}", e); std::process::exit(1); }
+                }
+                if let Some(ref tt) = task_type {
+                    if let Err(e) = tt.parse::<TaskType>() { eprintln!("{}", e); std::process::exit(1); }
+                }
                 match db.create_task(&project, &subject, description.as_deref(), priority.as_deref(),
                     task_type.as_deref(), parent, due.as_deref(), None, assignee.as_deref(),
                     owner.as_deref(), None)
@@ -491,6 +497,12 @@ pub fn run_cli(command: Commands, db_path: &PathBuf) {
                 }
             }
             TaskCommands::Update { id, status, subject, description, assignee, owner, priority, due } => {
+                if let Some(ref s) = status {
+                    if let Err(e) = s.parse::<TaskStatus>() { eprintln!("{}", e); std::process::exit(1); }
+                }
+                if let Some(ref p) = priority {
+                    if let Err(e) = p.parse::<TaskPriority>() { eprintln!("{}", e); std::process::exit(1); }
+                }
                 let mut updates = serde_json::Map::new();
                 if let Some(v) = status { updates.insert("status".into(), serde_json::Value::String(v)); }
                 if let Some(v) = subject { updates.insert("subject".into(), serde_json::Value::String(v)); }
@@ -599,7 +611,7 @@ pub fn run_cli(command: Commands, db_path: &PathBuf) {
         Commands::Archive { command: archive_cmd } => {
             let db_path_str = db_path.to_string_lossy().to_string();
             match archive_cmd {
-                ArchiveCommands::Create { output, entity_type, older_than, project, category, purge, force } => {
+                ArchiveCommands::Create { output, entity_type, older_than, project, category, limit, purge, force } => {
                     let valid_types = ["memories", "conversations", "tasks", "all"];
                     if !valid_types.contains(&entity_type.as_str()) {
                         eprintln!("Invalid entity type '{}'. Must be one of: {}", entity_type, valid_types.join(", "));
@@ -608,7 +620,7 @@ pub fn run_cli(command: Commands, db_path: &PathBuf) {
                     let output_path = std::path::Path::new(&output);
                     if let Err(e) = crate::archive::run_archive_create(
                         &db, &db_path_str, output_path, &entity_type,
-                        older_than, project.as_deref(), category.as_deref(), !purge, force,
+                        older_than, project.as_deref(), category.as_deref(), !purge, force, limit,
                     ) {
                         eprintln!("{}", e);
                         std::process::exit(1);
@@ -624,7 +636,7 @@ pub fn run_cli(command: Commands, db_path: &PathBuf) {
             }
         }
 
-        Commands::Export { database_url, tables, batch_size } => {
+        Commands::Export { database_url, tables } => {
             let table_list = crate::rdbms_export::parse_tables(tables.as_deref());
             let valid = ["memories", "conversations", "tasks", "task_deps", "links"];
             for t in &table_list {
@@ -637,7 +649,7 @@ pub fn run_cli(command: Commands, db_path: &PathBuf) {
                 .enable_all()
                 .build()
                 .unwrap();
-            if let Err(e) = rt.block_on(crate::rdbms_export::run_export(&db, &database_url, &table_list, batch_size)) {
+            if let Err(e) = rt.block_on(crate::rdbms_export::run_export(&db, &database_url, &table_list)) {
                 eprintln!("{}", e);
                 std::process::exit(1);
             }

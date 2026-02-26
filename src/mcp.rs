@@ -2,7 +2,7 @@ use serde_json::{json, Value};
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 
-use crate::db::Database;
+use crate::db::{Database, TaskStatus, TaskPriority, TaskType, EntryType};
 
 /// MCP JSON-RPC server over stdio.
 /// Handles initialize, tools/list, tools/call, and notifications.
@@ -551,6 +551,10 @@ fn tool_log_conversation(args: &Value, db: &Database) -> Result<String, String> 
     let entry_type = args.get("entry_type").and_then(|v| v.as_str());
     let raw_id = args.get("raw_id").and_then(|v| v.as_i64());
 
+    if let Some(et) = entry_type {
+        et.parse::<EntryType>().map_err(|e| e)?;
+    }
+
     let entry = db.log_conversation(session_id, role, content, project, entry_type, raw_id)
         .map_err(|e| format!("Log error: {}", e))?;
 
@@ -608,6 +612,13 @@ fn tool_create_task(args: &Value, db: &Database) -> Result<String, String> {
     let owner = args.get("owner").and_then(|v| v.as_str());
     let session_id = args.get("session_id").and_then(|v| v.as_str());
 
+    if let Some(p) = priority {
+        p.parse::<TaskPriority>().map_err(|e| e)?;
+    }
+    if let Some(tt) = task_type {
+        tt.parse::<TaskType>().map_err(|e| e)?;
+    }
+
     let task = db.create_task(project, subject, description, priority, task_type,
         parent_id, due_date, created_by, assignee, owner, session_id)
         .map_err(|e| format!("DB error: {}", e))?;
@@ -618,6 +629,16 @@ fn tool_create_task(args: &Value, db: &Database) -> Result<String, String> {
 fn tool_update_task(args: &Value, db: &Database) -> Result<String, String> {
     let task_id = args.get("task_id").and_then(|v| v.as_i64())
         .ok_or("missing 'task_id'")?;
+
+    if let Some(s) = args.get("status").and_then(|v| v.as_str()) {
+        s.parse::<TaskStatus>().map_err(|e| e)?;
+    }
+    if let Some(p) = args.get("priority").and_then(|v| v.as_str()) {
+        p.parse::<TaskPriority>().map_err(|e| e)?;
+    }
+    if let Some(tt) = args.get("task_type").and_then(|v| v.as_str()) {
+        tt.parse::<TaskType>().map_err(|e| e)?;
+    }
 
     let task = db.update_task(task_id, args)
         .map_err(|e| format!("DB error: {}", e))?;
@@ -653,6 +674,16 @@ fn tool_list_tasks(args: &Value, db: &Database) -> Result<String, String> {
     let task_type = args.get("task_type").and_then(|v| v.as_str());
     let priority = args.get("priority").and_then(|v| v.as_str());
     let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(50) as usize;
+
+    if let Some(s) = status {
+        s.parse::<TaskStatus>().map_err(|e| e)?;
+    }
+    if let Some(tt) = task_type {
+        tt.parse::<TaskType>().map_err(|e| e)?;
+    }
+    if let Some(p) = priority {
+        p.parse::<TaskPriority>().map_err(|e| e)?;
+    }
 
     let tasks = db.list_tasks(project, status, assignee, task_type, priority, limit)
         .map_err(|e| format!("List error: {}", e))?;
